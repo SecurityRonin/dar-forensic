@@ -36,7 +36,7 @@
 //!   data-section header that precedes them in the body stream.
 //!   `seek(archive_origin + archive_offset)` then `read(stored_size)`.
 //!
-//! Full format notes: `dar/tests/data/README.md`.
+//! Full format notes: `docs/implementation-notes.md`.
 
 use std::io::{Read, Seek, SeekFrom};
 
