@@ -27,7 +27,7 @@ fn corpus_test_dar_extract_all_entries() {
         return;
     }
     let data = std::fs::read(&path).expect("read test.dar");
-    let reader = DarReader::open(Cursor::new(&data)).expect("open");
+    let mut reader = DarReader::open(Cursor::new(data)).expect("open");
     for entry in reader.entries() {
         let result = reader.extract(&entry.path);
         assert!(result.is_ok(), "extract({}) must succeed", entry.path);

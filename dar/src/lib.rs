@@ -1,45 +1,32 @@
-//! Pure-Rust DAR (Disk ARchiver) archive reader.
+//! Pure-Rust reader for Denis Corbin DAR (Disk ARchiver) archives.
 //!
-//! Reads archives in the SecurityRonin DAR format:
+//! Supports DAR format versions 8, 9, and 11 (produced by dar 2.x).
 //!
-//! ```text
-//! [4]  magic = b"DAR\x00"
-//! [4]  version = 1u32 LE
-//! [4]  entry_count (u32 LE)
-//! For each entry:
-//!   [4]  name_len (u32 LE)
-//!   [name_len]  path (UTF-8)
-//!   [8]  data_len (u64 LE)
-//!   [data_len]  raw data
-//!   [4]  crc32 of data (u32 LE)
-//! [4]  catalog magic = b"CATL"
-//! [4]  catalog entry count (u32 LE)
-//! For each catalog entry:
-//!   [4]  name_len
-//!   [name_len]  path (UTF-8)
-//!   [8]  data_offset (u64 LE) — byte position in the archive file
-//!   [8]  data_len (u64 LE)
-//! ```
+//! Format overview:
+//!   Slice header: magic(4) + label(10) + flag(1) + ext_char(1) + TLV_list
+//!   Archive body: version_string + escapes + file_data
+//!   Catalog:      seqt_catalogue_escape + label(10) + path + entries
+//!   Slice trailer: version + offsets
 
 use std::io::{Read, Seek, SeekFrom};
 
 use thiserror::Error;
 
-const MAGIC: &[u8; 4] = b"DAR\x00";
-const VERSION: u32 = 1;
-const CATALOG_MAGIC: &[u8; 4] = b"CATL";
+/// `00 00 00 7b` — DAR magic (SAUV_MAGIC_NUMBER = 123, big-endian u32).
+const DAR_MAGIC: [u8; 4] = [0x00, 0x00, 0x00, 0x7b];
 
-/// Errors returned by `DarReader`.
+/// Escape sequence marking the catalog: `AD FD EA 77 21 43`.
+const SEQT_CATALOGUE: [u8; 6] = [0xAD, 0xFD, 0xEA, 0x77, 0x21, 0x43];
+
+/// Errors returned by [`DarReader`].
 #[derive(Debug, Error)]
 pub enum DarError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("not a DAR archive: bad magic")]
+    #[error("not a DAR archive")]
     NotADar,
-    #[error("corrupt catalog: {0}")]
-    CorruptCatalog(String),
-    #[error("CRC32 mismatch for '{path}': expected {expected:#010x}, got {got:#010x}")]
-    BadChecksum { path: String, expected: u32, got: u32 },
+    #[error("corrupt archive: {0}")]
+    Corrupt(String),
     #[error("entry not found: '{0}'")]
     EntryNotFound(String),
 }
@@ -54,13 +41,19 @@ pub struct DarEntry {
 #[derive(Debug, Clone)]
 struct EntryRef {
     path: String,
-    data_offset: u64,
-    data_len: u64,
+    size: u64,
+    archive_offset: u64,
+    stored_size: u64,
+    compression: u8,
+    encrypted: bool,
 }
 
 /// Read-only DAR archive reader.
 pub struct DarReader<R: Read + Seek> {
     inner: R,
+    /// Byte position immediately after the slice header TLV block.
+    /// `archive_origin + archive_offset` = absolute position of raw file bytes.
+    archive_origin: u64,
     entries: Vec<EntryRef>,
 }
 
@@ -69,70 +62,44 @@ impl<R: Read + Seek> DarReader<R> {
     pub fn open(mut reader: R) -> Result<Self, DarError> {
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic).map_err(|_| DarError::NotADar)?;
-        if &magic != MAGIC {
+        if magic != DAR_MAGIC {
             return Err(DarError::NotADar);
         }
-        let version = read_u32le(&mut reader).map_err(|_| DarError::NotADar)?;
-        if version != VERSION {
-            return Err(DarError::NotADar);
-        }
-        let entry_count = read_u32le(&mut reader).map_err(|_| DarError::NotADar)?;
 
-        // Skip past all file data to find the catalog.
-        for _ in 0..entry_count {
-            let name_len = read_u32le(&mut reader)
-                .map_err(|e| DarError::CorruptCatalog(e.to_string()))?;
-            reader
-                .seek(SeekFrom::Current(name_len as i64))
-                .map_err(|e| DarError::CorruptCatalog(e.to_string()))?;
-            let data_len = read_u64le(&mut reader)
-                .map_err(|e| DarError::CorruptCatalog(e.to_string()))?;
-            // Skip data + CRC
-            reader
-                .seek(SeekFrom::Current(data_len as i64 + 4))
-                .map_err(|e| DarError::CorruptCatalog(e.to_string()))?;
+        skip(&mut reader, 10)?; // internal_name label
+        skip(&mut reader, 2)?;  // flag + ext_char
+
+        // TLV list: infinint(count) then count × (u16 type + infinint len + data)
+        let tlv_count = read_infinint(&mut reader)
+            .map_err(|_| DarError::Corrupt("truncated TLV block".into()))?;
+        for _ in 0..tlv_count {
+            skip(&mut reader, 2)?;
+            let len = read_infinint(&mut reader)?;
+            skip(&mut reader, len)?;
         }
 
-        // Read catalog magic
-        let mut cat_magic = [0u8; 4];
-        reader
-            .read_exact(&mut cat_magic)
-            .map_err(|e| DarError::CorruptCatalog(e.to_string()))?;
-        if &cat_magic != CATALOG_MAGIC {
-            return Err(DarError::CorruptCatalog("missing CATL marker".into()));
-        }
+        // Everything after the TLV block is addressed by archive_offset.
+        let archive_origin = reader.stream_position()?;
 
-        let cat_count = read_u32le(&mut reader)
-            .map_err(|e| DarError::CorruptCatalog(e.to_string()))?;
-        let mut entries = Vec::with_capacity(cat_count as usize);
-        for _ in 0..cat_count {
-            let name_len = read_u32le(&mut reader)
-                .map_err(|e| DarError::CorruptCatalog(e.to_string()))?;
-            let mut name_bytes = vec![0u8; name_len as usize];
-            reader
-                .read_exact(&mut name_bytes)
-                .map_err(|e| DarError::CorruptCatalog(e.to_string()))?;
-            let path = String::from_utf8(name_bytes)
-                .map_err(|e| DarError::CorruptCatalog(e.to_string()))?;
-            let data_offset = read_u64le(&mut reader)
-                .map_err(|e| DarError::CorruptCatalog(e.to_string()))?;
-            let data_len = read_u64le(&mut reader)
-                .map_err(|e| DarError::CorruptCatalog(e.to_string()))?;
-            entries.push(EntryRef { path, data_offset, data_len });
-        }
+        find_catalogue(&mut reader)?;
 
-        Ok(Self { inner: reader, entries })
+        skip(&mut reader, 10)?;      // catalog label
+        skip_nul_string(&mut reader)?; // catalog working-directory path
+
+        let entries = parse_catalog(&mut reader)?;
+
+        Ok(Self { inner: reader, archive_origin, entries })
     }
 
-    /// List all archived entries (path and size).
+    /// List all archived file entries (path and uncompressed size).
     pub fn entries(&self) -> Vec<DarEntry> {
         self.entries
             .iter()
-            .map(|e| DarEntry { path: e.path.clone(), size: e.data_len })
+            .map(|e| DarEntry { path: e.path.clone(), size: e.size })
             .collect()
     }
 
-    /// Extract a file by path, verifying its CRC32.
+    /// Extract a file by path, returning its raw bytes.
     pub fn extract(&mut self, path: &str) -> Result<Vec<u8>, DarError> {
         let entry = self
             .entries
@@ -141,176 +108,197 @@ impl<R: Read + Seek> DarReader<R> {
             .ok_or_else(|| DarError::EntryNotFound(path.to_string()))?
             .clone();
 
-        self.inner.seek(SeekFrom::Start(entry.data_offset))?;
-        let mut data = vec![0u8; entry.data_len as usize];
-        self.inner.read_exact(&mut data)?;
-
-        // CRC32 is stored immediately after the data in the archive.
-        let stored_crc = read_u32le(&mut self.inner)?;
-        let computed = crc32(&data);
-        if stored_crc != computed {
-            return Err(DarError::BadChecksum {
-                path: path.to_string(),
-                expected: stored_crc,
-                got: computed,
-            });
+        if entry.encrypted {
+            return Err(DarError::Corrupt(format!("'{}' is encrypted", path)));
         }
+        if entry.compression != b'n' {
+            return Err(DarError::Corrupt(format!(
+                "'{}' uses unsupported compression '{}'",
+                path, entry.compression as char
+            )));
+        }
+
+        self.inner
+            .seek(SeekFrom::Start(self.archive_origin + entry.archive_offset))?;
+        let mut data = vec![0u8; entry.stored_size as usize];
+        self.inner.read_exact(&mut data)?;
         Ok(data)
     }
 }
 
-fn read_u32le<R: Read>(r: &mut R) -> std::io::Result<u32> {
-    let mut b = [0u8; 4];
-    r.read_exact(&mut b)?;
-    Ok(u32::from_le_bytes(b))
+// ── Catalog parser ────────────────────────────────────────────────────────────
+
+/// Scan forward until the seqt_catalogue escape is found and consumed.
+///
+/// After return the reader is positioned immediately after the 6-byte escape,
+/// at the first byte of the catalog payload.
+fn find_catalogue<R: Read + Seek>(r: &mut R) -> Result<(), DarError> {
+    let n = SEQT_CATALOGUE.len();
+    let mut window = [0u8; 6];
+    r.read_exact(&mut window)
+        .map_err(|_| DarError::Corrupt("archive body too short".into()))?;
+
+    loop {
+        if window == SEQT_CATALOGUE {
+            return Ok(());
+        }
+        window.copy_within(1.., 0);
+        r.read_exact(&mut window[n - 1..])
+            .map_err(|_| DarError::Corrupt("seqt_catalogue not found".into()))?;
+    }
 }
 
-fn read_u64le<R: Read>(r: &mut R) -> std::io::Result<u64> {
-    let mut b = [0u8; 8];
-    r.read_exact(&mut b)?;
-    Ok(u64::from_le_bytes(b))
-}
+/// Parse all catalog entries, returning file entries with their extraction info.
+///
+/// Stops when the root directory is closed (depth reaches zero) or an unknown
+/// entry type is encountered (slice trailer).
+fn parse_catalog<R: Read + Seek>(r: &mut R) -> Result<Vec<EntryRef>, DarError> {
+    let mut entries = Vec::new();
+    let mut dir_stack: Vec<String> = Vec::new();
+    let mut depth: u32 = 0;
 
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &byte in data {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            if crc & 1 == 1 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
+    loop {
+        let mut buf = [0u8; 1];
+        match r.read_exact(&mut buf) {
+            Ok(()) => {}
+            Err(_) => break,
+        }
+
+        // Lower 5 bits of cat_sig + 0x60 gives the ASCII type letter.
+        let entry_type = ((buf[0] & 0x1f) | 0x60) as char;
+
+        match entry_type {
+            'z' => {
+                // End of directory
+                depth = depth.saturating_sub(1);
+                dir_stack.pop();
+                if depth == 0 {
+                    break;
+                }
             }
+            'd' => {
+                let name = read_nul_string(r)?;
+                let flags = read_inode_base(r)?;
+                if (flags >> 4) & 1 != 0 {
+                    skip_fsa(r)?;
+                }
+                depth += 1;
+                // <ROOT> is a virtual root; don't include it in file paths.
+                if name != "<ROOT>" {
+                    dir_stack.push(name);
+                }
+            }
+            'f' => {
+                let name = read_nul_string(r)?;
+                let flags = read_inode_base(r)?;
+                if (flags >> 4) & 1 != 0 {
+                    skip_fsa(r)?;
+                }
+
+                let size = read_infinint(r)?;
+                let archive_offset = read_infinint(r)?;
+                let stored_size = read_infinint(r)?;
+                let encryption_flag = read_u8(r)?;
+                let compression = read_u8(r)?;
+                let crc_size = read_infinint(r)?;
+                skip(r, crc_size)?;
+
+                let path = if dir_stack.is_empty() {
+                    name
+                } else {
+                    format!("{}/{}", dir_stack.join("/"), name)
+                };
+
+                entries.push(EntryRef {
+                    path,
+                    size,
+                    archive_offset,
+                    stored_size,
+                    compression,
+                    encrypted: encryption_flag != 0,
+                });
+            }
+            _ => break, // unknown type = slice trailer boundary
         }
     }
-    !crc
+
+    Ok(entries)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
+// ── Low-level I/O helpers ─────────────────────────────────────────────────────
 
-    // ── Test helper ────────────────────────────────────────────────────────────
+/// Read a 5-byte DAR infinint: `0x80 XX XX XX XX` → big-endian u32.
+fn read_infinint<R: Read>(r: &mut R) -> Result<u64, DarError> {
+    let mut buf = [0u8; 5];
+    r.read_exact(&mut buf)?;
+    if buf[0] != 0x80 {
+        return Err(DarError::Corrupt(format!(
+            "invalid infinint preamble: 0x{:02x}",
+            buf[0]
+        )));
+    }
+    Ok(u32::from_be_bytes(buf[1..5].try_into().unwrap()) as u64)
+}
 
-    fn make_dar(files: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut out = Vec::new();
-        // Header
-        out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&VERSION.to_le_bytes());
-        out.extend_from_slice(&(files.len() as u32).to_le_bytes());
+fn read_u8<R: Read>(r: &mut R) -> Result<u8, DarError> {
+    let mut b = [0u8; 1];
+    r.read_exact(&mut b)?;
+    Ok(b[0])
+}
 
-        // Track where each file's data begins (after name_len + name + data_len)
-        let mut data_offsets: Vec<u64> = Vec::new();
-
-        // File entries
-        for (name, data) in files {
-            let name_bytes = name.as_bytes();
-            let pos_before_data = out.len() as u64
-                + 4 // name_len field
-                + name_bytes.len() as u64
-                + 8; // data_len field
-            data_offsets.push(pos_before_data);
-            out.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-            out.extend_from_slice(name_bytes);
-            out.extend_from_slice(&(data.len() as u64).to_le_bytes());
-            out.extend_from_slice(data);
-            out.extend_from_slice(&crc32(data).to_le_bytes());
+/// Read a NUL-terminated UTF-8 string, consuming the NUL byte.
+fn read_nul_string<R: Read>(r: &mut R) -> Result<String, DarError> {
+    let mut bytes = Vec::new();
+    loop {
+        let b = read_u8(r)?;
+        if b == 0 {
+            break;
         }
+        bytes.push(b);
+    }
+    String::from_utf8(bytes).map_err(|e| DarError::Corrupt(e.to_string()))
+}
 
-        // Catalog
-        out.extend_from_slice(CATALOG_MAGIC);
-        out.extend_from_slice(&(files.len() as u32).to_le_bytes());
-        for ((name, data), offset) in files.iter().zip(data_offsets.iter()) {
-            let name_bytes = name.as_bytes();
-            out.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-            out.extend_from_slice(name_bytes);
-            out.extend_from_slice(&offset.to_le_bytes());
-            out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+/// Skip a NUL-terminated string without collecting the bytes.
+fn skip_nul_string<R: Read>(r: &mut R) -> Result<(), DarError> {
+    loop {
+        if read_u8(r)? == 0 {
+            return Ok(());
         }
-        out
     }
+}
 
-    // ── Tests ──────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn not_a_dar_returns_err() {
-        let data = b"this is not a DAR archive at all";
-        let result = DarReader::open(Cursor::new(data));
-        assert!(matches!(result, Err(DarError::NotADar)));
+/// Seek past `n` bytes.
+fn skip<R: Seek>(r: &mut R, n: u64) -> Result<(), DarError> {
+    if n > 0 {
+        r.seek(SeekFrom::Current(n as i64))
+            .map(|_| ())
+            .map_err(DarError::Io)?;
     }
+    Ok(())
+}
 
-    #[test]
-    fn empty_archive_has_no_entries() {
-        let archive = make_dar(&[]);
-        let reader = DarReader::open(Cursor::new(archive)).expect("open failed");
-        assert!(reader.entries().is_empty());
+/// Read the inode flags byte and seek past the remaining fixed-size fields.
+///
+/// Base layout (31 bytes when bit 4 clear, 41 bytes when bit 4 set):
+///   flags(1) + uid(5) + gid(5) + perms(2) + ctime(6) + mtime(6) + atime(6)
+///   [+ nlink(5) + field9(5) only when (flags >> 4) & 1 == 1]
+fn read_inode_base<R: Read + Seek>(r: &mut R) -> Result<u8, DarError> {
+    let flags = read_u8(r)?;
+    // uid(5)+gid(5)+perms(2)+ctime(6)+mtime(6)+atime(6) = 30 bytes always present
+    skip(r, 30)?;
+    // nlink and field9 only present when bit 4 is set
+    if (flags >> 4) & 1 != 0 {
+        skip(r, 10)?;
     }
+    Ok(flags)
+}
 
-    #[test]
-    fn single_file_listed_in_entries() {
-        let archive = make_dar(&[("readme.txt", b"hello")]);
-        let reader = DarReader::open(Cursor::new(archive)).expect("open failed");
-        let entries = reader.entries();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].path, "readme.txt");
-        assert_eq!(entries[0].size, 5);
-    }
-
-    #[test]
-    fn multiple_files_listed() {
-        let archive = make_dar(&[("a.bin", b"aaa"), ("b.bin", b"bbb"), ("c.bin", b"ccc")]);
-        let reader = DarReader::open(Cursor::new(archive)).expect("open failed");
-        let entries = reader.entries();
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].path, "a.bin");
-        assert_eq!(entries[1].path, "b.bin");
-        assert_eq!(entries[2].path, "c.bin");
-    }
-
-    #[test]
-    fn extract_returns_correct_bytes() {
-        let payload = b"forensic evidence content";
-        let archive = make_dar(&[("evidence.bin", payload)]);
-        let mut reader = DarReader::open(Cursor::new(archive)).expect("open failed");
-        let extracted = reader.extract("evidence.bin").expect("extract failed");
-        assert_eq!(extracted, payload);
-    }
-
-    #[test]
-    fn bad_checksum_returns_err() {
-        let mut archive = make_dar(&[("data.bin", b"original content")]);
-        // Data starts at: 4(magic)+4(ver)+4(cnt) + 4(namelen)+8("data.bin")+8(datalen) = 32
-        // Corrupt first byte of the actual payload; the CRC should then mismatch.
-        archive[32] ^= 0xFF;
-        let mut reader = DarReader::open(Cursor::new(archive)).expect("open failed");
-        let result = reader.extract("data.bin");
-        assert!(matches!(result, Err(DarError::BadChecksum { .. })));
-    }
-
-    #[test]
-    fn extract_not_found_returns_err() {
-        let archive = make_dar(&[("present.txt", b"here")]);
-        let mut reader = DarReader::open(Cursor::new(archive)).expect("open failed");
-        let result = reader.extract("missing.txt");
-        assert!(matches!(result, Err(DarError::EntryNotFound(_))));
-    }
-
-    #[test]
-    fn extract_multiple_files_independently() {
-        let archive = make_dar(&[("alpha.bin", b"ALPHA"), ("beta.bin", b"BETA DATA")]);
-        let mut reader = DarReader::open(Cursor::new(archive)).expect("open failed");
-        let alpha = reader.extract("alpha.bin").expect("extract alpha");
-        let beta = reader.extract("beta.bin").expect("extract beta");
-        assert_eq!(alpha, b"ALPHA");
-        assert_eq!(beta, b"BETA DATA");
-    }
-
-    #[test]
-    fn extract_nested_path() {
-        let archive = make_dar(&[("subdir/file.bin", b"nested data")]);
-        let mut reader = DarReader::open(Cursor::new(archive)).expect("open failed");
-        let data = reader.extract("subdir/file.bin").expect("extract failed");
-        assert_eq!(data, b"nested data");
-    }
+/// Skip one FSA (filesystem attributes) block.
+///
+/// Format: infinint(family_tag) + infinint(data_size) + data_size bytes.
+fn skip_fsa<R: Read + Seek>(r: &mut R) -> Result<(), DarError> {
+    let _tag = read_infinint(r)?;
+    let size = read_infinint(r)?;
+    skip(r, size)
 }
