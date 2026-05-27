@@ -1,12 +1,42 @@
 //! Pure-Rust reader for Denis Corbin DAR (Disk ARchiver) archives.
 //!
 //! Supports DAR format versions 8, 9, and 11 (produced by dar 2.x).
+//! Passware Mobile produces v8/v9 archives; dar 2.8.5 produces v11.
 //!
-//! Format overview:
-//!   Slice header: magic(4) + label(10) + flag(1) + ext_char(1) + TLV_list
-//!   Archive body: version_string + escapes + file_data
-//!   Catalog:      seqt_catalogue_escape + label(10) + path + entries
-//!   Slice trailer: version + offsets
+//! ## Format sketch
+//!
+//! ```text
+//! Slice header:
+//!   [4]  magic = 00 00 00 7b  (SAUV_MAGIC_NUMBER = 123, big-endian u32)
+//!   [10] internal_name label
+//!   [1]  flag  [1]  ext_char
+//!   TLV list:  infinint(count) + count × (u16 type + infinint len + data)
+//!   ← archive_origin: all catalog archive_offset values are relative to here
+//!
+//! Archive body:
+//!   escaped sequences (seqt_file, seqt_saved, …) + raw file bytes
+//!
+//! Catalog  (located by seqt_catalogue escape: AD FD EA 77 21 43):
+//!   [10] label  +  NUL-terminated path  +  entries
+//!
+//!   Each entry: cat_sig byte where (cat_sig & 0x1f | 0x60) gives type
+//!     'd' directory  → NUL-name + inode [+ FSA]  (push to dir stack)
+//!     'f' file       → NUL-name + inode [+ FSA] + file-specific fields
+//!     'z' EOD        → pop dir stack; depth=0 → done
+//! ```
+//!
+//! ## Key non-obvious invariants
+//!
+//! - **Infinint**: always 5 bytes — `0x80 XX XX XX XX`, value = last 4 as
+//!   big-endian u32.
+//! - **Permissions**: 2-byte big-endian u16, *not* an infinint.
+//! - **Inode bit 4**: when set the inode is 41 bytes (includes nlink+field9)
+//!   and an FSA block follows; when clear the inode is 31 bytes, no FSA.
+//! - **archive_offset**: points *directly* to the raw file bytes, not to the
+//!   data-section header that precedes them in the body stream.
+//!   `seek(archive_origin + archive_offset)` then `read(stored_size)`.
+//!
+//! Full format notes: `dar/tests/data/README.md`.
 
 use std::io::{Read, Seek, SeekFrom};
 
