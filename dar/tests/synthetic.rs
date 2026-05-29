@@ -174,6 +174,67 @@ fn nested_directory_path_is_correct() {
     assert_eq!(r.entries()[0].path, "sub/file.txt");
 }
 
+// ── catalog: EOF without EOD ──────────────────────────────────────────────────
+
+/// Archive whose catalog ends at EOF before the 'z' EOD entry.
+///
+/// `parse_catalog` must break cleanly on `Err(_)` from `read_exact` rather
+/// than returning an error — partial catalogs are valid output.
+#[test]
+fn catalog_eof_without_eod_returns_entries() {
+    let mut buf = header();
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    buf.extend(file_entry("lone.txt", 0, b'n', 0, 0));
+    // deliberately omit the EOD byte
+    let r = DarReader::open(Cursor::new(buf)).expect("open");
+    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
+    assert_eq!(paths, ["lone.txt"]);
+}
+
+// ── catalog: unknown entry type ────────────────────────────────────────────────
+
+/// An unrecognised cat_sig type must terminate parsing without error,
+/// returning whatever entries were collected before it.
+#[test]
+fn catalog_unknown_entry_type_stops_parsing() {
+    let mut buf = header();
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    buf.extend(file_entry("before.txt", 0, b'n', 0, 0));
+    buf.push(0x01); // cat_sig → 'a' (0x61), unknown type
+    buf.push(EOD);  // never reached
+    let r = DarReader::open(Cursor::new(buf)).expect("open");
+    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
+    assert_eq!(paths, ["before.txt"]);
+}
+
+// ── catalog: invalid UTF-8 filename ───────────────────────────────────────────
+
+/// A file entry whose name contains invalid UTF-8 must cause `open` to fail
+/// with `DarError::Corrupt`, not a panic or silent data loss.
+#[test]
+fn catalog_invalid_utf8_filename_returns_corrupt() {
+    let mut buf = header();
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    // Manually build a file entry with a non-UTF8 name: [0xFF, 0x80, NUL]
+    buf.push(0x06); // cat_sig 'f'
+    buf.extend_from_slice(&[0xFF, 0x80, 0x00]); // invalid UTF-8 name + NUL
+    buf.extend(inode_base(false));
+    buf.extend_from_slice(&inf(0)); // size
+    buf.extend_from_slice(&inf(0)); // archive_offset
+    buf.extend_from_slice(&inf(0)); // stored_size
+    buf.push(0x00); // enc
+    buf.push(b'n'); // comp
+    buf.extend_from_slice(&inf(0)); // crc_size
+    buf.push(EOD);
+    assert!(matches!(
+        DarReader::open(Cursor::new(buf)),
+        Err(DarError::Corrupt(_))
+    ));
+}
+
 // ── extract correct bytes ─────────────────────────────────────────────────────
 
 /// Verifies archive_origin + archive_offset arithmetic end-to-end.

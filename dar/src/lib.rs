@@ -334,3 +334,163 @@ fn skip_fsa<R: Read + Seek>(r: &mut R) -> Result<(), DarError> {
     let size = read_infinint(r)?;
     skip(r, size)
 }
+
+// ── Unit tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    // ── read_infinint ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn infinint_decodes_value() {
+        let data = [0x80u8, 0x00, 0x00, 0x00, 0x0d];
+        assert_eq!(read_infinint(&mut Cursor::new(&data[..])).unwrap(), 13);
+    }
+
+    #[test]
+    fn infinint_bad_preamble_returns_corrupt() {
+        let data = [0x01u8, 0x00, 0x00, 0x00, 0x00];
+        let err = read_infinint(&mut Cursor::new(&data[..])).unwrap_err();
+        assert!(matches!(&err, DarError::Corrupt(s) if s.contains("preamble")));
+    }
+
+    #[test]
+    fn infinint_truncated_returns_io() {
+        // Only 2 bytes — read_exact needs 5.
+        let err = read_infinint(&mut Cursor::new(&[0x80u8, 0x00][..])).unwrap_err();
+        assert!(matches!(err, DarError::Io(_)));
+    }
+
+    // ── read_u8 ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn read_u8_reads_single_byte() {
+        assert_eq!(read_u8(&mut Cursor::new(&[0x42u8][..])).unwrap(), 0x42);
+    }
+
+    #[test]
+    fn read_u8_eof_returns_io() {
+        let err = read_u8(&mut Cursor::new(&[][..])).unwrap_err();
+        assert!(matches!(err, DarError::Io(_)));
+    }
+
+    // ── read_nul_string ───────────────────────────────────────────────────────
+
+    #[test]
+    fn nul_string_reads_until_nul() {
+        let data = b"hello\x00world";
+        assert_eq!(read_nul_string(&mut Cursor::new(&data[..])).unwrap(), "hello");
+    }
+
+    #[test]
+    fn nul_string_invalid_utf8_returns_corrupt() {
+        // 0xFF 0x80 is not valid UTF-8; 0x00 terminates.
+        let data = [0xFF, 0x80, 0x00];
+        let err = read_nul_string(&mut Cursor::new(&data[..])).unwrap_err();
+        assert!(matches!(err, DarError::Corrupt(_)));
+    }
+
+    #[test]
+    fn nul_string_eof_before_nul_returns_io() {
+        let err = read_nul_string(&mut Cursor::new(b"no-nul".to_vec())).unwrap_err();
+        assert!(matches!(err, DarError::Io(_)));
+    }
+
+    // ── skip_nul_string ───────────────────────────────────────────────────────
+
+    #[test]
+    fn skip_nul_string_advances_past_nul() {
+        let data = b"skip\x00rest";
+        let mut c = Cursor::new(data.to_vec());
+        skip_nul_string(&mut c).unwrap();
+        assert_eq!(c.position(), 5); // "skip\0" = 5 bytes consumed
+    }
+
+    #[test]
+    fn skip_nul_string_eof_returns_io() {
+        let err = skip_nul_string(&mut Cursor::new(b"no-nul".to_vec())).unwrap_err();
+        assert!(matches!(err, DarError::Io(_)));
+    }
+
+    // ── find_catalogue ────────────────────────────────────────────────────────
+
+    #[test]
+    fn find_catalogue_body_too_short() {
+        // Fewer than 6 bytes — can't fill the initial window.
+        let err = find_catalogue(&mut Cursor::new(&[0x01u8, 0x02, 0x03][..])).unwrap_err();
+        assert!(matches!(&err, DarError::Corrupt(s) if s == "archive body too short"));
+    }
+
+    #[test]
+    fn find_catalogue_escape_at_start() {
+        let mut data = vec![0xAD, 0xFD, 0xEA, 0x77, 0x21, 0x43, 0xFF];
+        let mut c = Cursor::new(&mut data[..]);
+        find_catalogue(&mut c).unwrap();
+        assert_eq!(c.position(), 6);
+    }
+
+    #[test]
+    fn find_catalogue_escape_not_found() {
+        // 10 bytes of zeros — escape never appears.
+        let err = find_catalogue(&mut Cursor::new(&[0u8; 10][..])).unwrap_err();
+        assert!(matches!(&err, DarError::Corrupt(s) if s == "seqt_catalogue not found"));
+    }
+
+    // ── skip ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn skip_zero_does_not_move_cursor() {
+        let mut c = Cursor::new(vec![0xFFu8; 10]);
+        skip(&mut c, 0).unwrap();
+        assert_eq!(c.position(), 0);
+    }
+
+    #[test]
+    fn skip_n_advances_cursor() {
+        let mut c = Cursor::new(vec![0xFFu8; 10]);
+        skip(&mut c, 7).unwrap();
+        assert_eq!(c.position(), 7);
+    }
+
+    // ── read_inode_base ───────────────────────────────────────────────────────
+
+    #[test]
+    fn inode_base_bit4_clear_reads_31_bytes() {
+        // flags=0x00 (bit4 clear) + 30 bytes
+        let mut data = vec![0x00u8]; // flags
+        data.extend_from_slice(&[0xAA; 30]);
+        data.push(0xFF); // sentinel
+        let mut c = Cursor::new(data);
+        assert_eq!(read_inode_base(&mut c).unwrap(), 0x00);
+        assert_eq!(c.position(), 31);
+    }
+
+    #[test]
+    fn inode_base_bit4_set_reads_41_bytes() {
+        // flags=0x10 (bit4 set) + 30 bytes + 10 bytes
+        let mut data = vec![0x10u8]; // flags
+        data.extend_from_slice(&[0xAA; 40]);
+        data.push(0xFF); // sentinel
+        let mut c = Cursor::new(data);
+        assert_eq!(read_inode_base(&mut c).unwrap(), 0x10);
+        assert_eq!(c.position(), 41);
+    }
+
+    // ── skip_fsa ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn skip_fsa_consumes_tag_size_and_data() {
+        // tag=infinint(5) + size=infinint(3) + 3 data bytes
+        let mut data = Vec::new();
+        data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x05]); // tag
+        data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x03]); // size=3
+        data.extend_from_slice(&[0xAA, 0xBB, 0xCC]);               // data
+        data.push(0xFF);                                             // sentinel
+        let mut c = Cursor::new(data);
+        skip_fsa(&mut c).unwrap();
+        assert_eq!(c.position(), 13); // 5 + 5 + 3 = 13
+    }
+}
