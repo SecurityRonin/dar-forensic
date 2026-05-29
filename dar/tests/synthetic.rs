@@ -90,7 +90,7 @@ fn minimal_dar(files: Vec<Vec<u8>>) -> Vec<u8> {
     v
 }
 
-// ── RED test: corrupt infinint preserves cause ────────────────────────────────
+// ── corrupt infinint preserves cause ─────────────────────────────────────────
 
 /// A bad preamble byte (0x01 ≠ 0x80) in the TLV-count infinint field.
 ///
@@ -113,4 +113,85 @@ fn corrupt_infinint_in_header_preserves_cause() {
         matches!(&err, DarError::Corrupt(s) if s.contains("preamble") || s.contains("infinint")),
         "expected Corrupt mentioning preamble/infinint, got: {err}"
     );
+}
+
+// ── no catalog escape ─────────────────────────────────────────────────────────
+
+#[test]
+fn no_catalog_escape_returns_corrupt() {
+    let mut buf = header();
+    buf.extend_from_slice(&[0u8; 64]); // body with no seqt_catalogue escape
+    assert!(matches!(
+        DarReader::open(Cursor::new(buf)),
+        Err(DarError::Corrupt(_))
+    ));
+}
+
+// ── extract: encrypted ────────────────────────────────────────────────────────
+
+#[test]
+fn extract_encrypted_entry_returns_corrupt() {
+    let dar = minimal_dar(vec![file_entry("secret.bin", 1, b'n', 0, 0)]);
+    let mut r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert!(matches!(r.extract("secret.bin"), Err(DarError::Corrupt(_))));
+}
+
+// ── extract: compressed ───────────────────────────────────────────────────────
+
+#[test]
+fn extract_compressed_entry_returns_corrupt() {
+    let dar = minimal_dar(vec![file_entry("data.lzo", 0, b'z', 0, 0)]);
+    let mut r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert!(matches!(r.extract("data.lzo"), Err(DarError::Corrupt(_))));
+}
+
+// ── multiple files ────────────────────────────────────────────────────────────
+
+#[test]
+fn two_files_both_listed() {
+    let dar = minimal_dar(vec![
+        file_entry("a.txt", 0, b'n', 0, 0),
+        file_entry("b.txt", 0, b'n', 0, 0),
+    ]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
+    assert_eq!(paths, ["a.txt", "b.txt"]);
+}
+
+// ── nested directory path ─────────────────────────────────────────────────────
+
+#[test]
+fn nested_directory_path_is_correct() {
+    // ROOT > sub/ > file.txt > EOD(sub) > EOD(ROOT)
+    let mut buf = header();
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    buf.extend(subdir("sub"));
+    buf.extend(file_entry("file.txt", 0, b'n', 0, 0));
+    buf.push(EOD); // close sub
+    buf.push(EOD); // close ROOT
+    let r = DarReader::open(Cursor::new(buf)).expect("open");
+    assert_eq!(r.entries()[0].path, "sub/file.txt");
+}
+
+// ── extract correct bytes ─────────────────────────────────────────────────────
+
+/// Verifies archive_origin + archive_offset arithmetic end-to-end.
+///
+/// Layout: header(21) | payload(4) | catalog_escape | … | file entry
+/// archive_origin = 21; archive_offset = 0; stored_size = 4
+/// → extract must seek to byte 21 and read exactly b"test"
+#[test]
+fn extract_returns_correct_bytes() {
+    const PAYLOAD: &[u8] = b"test";
+
+    let mut buf = header(); // 21 bytes; archive_origin = 21
+    buf.extend_from_slice(PAYLOAD); // bytes 21-24
+    buf.extend(catalog_open()); // escape at byte 25
+    buf.extend(root_dir());
+    buf.extend(file_entry("out.bin", 0, b'n', 0, PAYLOAD.len() as u32));
+    buf.push(EOD);
+
+    let mut r = DarReader::open(Cursor::new(buf)).expect("open");
+    assert_eq!(r.extract("out.bin").expect("extract"), PAYLOAD);
 }

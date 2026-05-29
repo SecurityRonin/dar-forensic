@@ -100,8 +100,10 @@ impl<R: Read + Seek> DarReader<R> {
         skip(&mut reader, 2)?;  // flag + ext_char
 
         // TLV list: infinint(count) then count × (u16 type + infinint len + data)
-        let tlv_count = read_infinint(&mut reader)
-            .map_err(|_| DarError::Corrupt("truncated TLV block".into()))?;
+        let tlv_count = read_infinint(&mut reader).map_err(|e| match e {
+            DarError::Io(_) => DarError::Corrupt("truncated TLV block".into()),
+            other => other,
+        })?;
         for _ in 0..tlv_count {
             skip(&mut reader, 2)?;
             let len = read_infinint(&mut reader)?;
