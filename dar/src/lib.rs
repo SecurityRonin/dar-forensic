@@ -164,6 +164,52 @@ impl<R: Read + Seek> DarReader<R> {
 
 // ── Catalog parser ────────────────────────────────────────────────────────────
 
+const CHUNK: usize = 4 * 1024 * 1024;
+// OVERLAP = max(SEQT_CATALOGUE.len(), label.len()) - 1; carries bytes across chunk boundaries.
+const OVERLAP: usize = 9;
+
+/// Scan forward from the current reader position searching for either the
+/// `seqt_catalogue` escape or the archive `label`.
+///
+/// Returns `Some(true)` if the escape was found (reader positioned just after it),
+/// `Some(false)` if the label was found (reader positioned just after it),
+/// `None` if EOF was reached without a match.
+fn scan_window<R: Read + Seek>(
+    r: &mut R,
+    label: &[u8; 10],
+    use_label: bool,
+) -> Result<Option<bool>, DarError> {
+    let mut buf = vec![0u8; CHUNK + OVERLAP];
+    let mut overlap_len: usize = 0;
+    loop {
+        let chunk_file_pos = r.stream_position()?;
+        let n = r.read(&mut buf[overlap_len..overlap_len + CHUNK])?;
+        if n == 0 {
+            break;
+        }
+        let total = overlap_len + n;
+        // buf[0..overlap_len]  → tail of previous chunk (file pos: chunk_file_pos - overlap_len)
+        // buf[overlap_len..total] → newly read bytes
+        let buf_base = chunk_file_pos - overlap_len as u64;
+
+        if let Some(i) = buf[..total].windows(SEQT_CATALOGUE.len()).position(|w| w == SEQT_CATALOGUE) {
+            r.seek(SeekFrom::Start(buf_base + i as u64 + SEQT_CATALOGUE.len() as u64))?;
+            return Ok(Some(true));
+        }
+        if use_label {
+            if let Some(i) = buf[..total].windows(label.len()).position(|w| w == label.as_ref()) {
+                r.seek(SeekFrom::Start(buf_base + i as u64 + label.len() as u64))?;
+                return Ok(Some(false));
+            }
+        }
+
+        let keep = OVERLAP.min(total);
+        buf.copy_within(total - keep..total, 0);
+        overlap_len = keep;
+    }
+    Ok(None)
+}
+
 /// Locate the catalog section and position the reader at its first entry.
 ///
 /// Returns `true` when the standard `seqt_catalogue` escape is found — the
@@ -174,59 +220,39 @@ impl<R: Read + Seek> DarReader<R> {
 ///
 /// Returns `Err(Corrupt)` when neither marker is found.
 ///
-/// Both searches run in a single forward pass using 4 MiB chunks so this
-/// remains efficient even on multi-gigabyte forensic archives.
+/// Strategy: DAR catalogs always live at the tail of the archive.  On forensic
+/// archives ≥ 256 MiB we jump straight to the last 256 MiB and scan forward
+/// from there, then fall back to a full forward scan from `archive_origin` if
+/// needed.  This reduces the I/O for a 92 GiB archive from ~99 GiB to ~107 MiB.
 fn find_catalogue<R: Read + Seek>(r: &mut R, label: &[u8; 10]) -> Result<bool, DarError> {
     // All-zero labels cannot be used as a reliable catalog marker (too common
-    // in zero-padded archive bodies).  Only attempt label fallback for archives
-    // whose label has at least one non-zero byte.
+    // in zero-padded archive bodies).
     let use_label = !label.iter().all(|&b| b == 0);
 
-    // Single forward pass using 4 MiB chunks.  OVERLAP = max(escape, label) - 1
-    // bytes are carried from the previous chunk so that patterns spanning a
-    // chunk boundary are not missed.
-    const CHUNK: usize = 4 * 1024 * 1024;
-    const OVERLAP: usize = 9; // max(SEQT_CATALOGUE.len(), label.len()) - 1
-    let mut buf = vec![0u8; CHUNK + OVERLAP];
-    let mut overlap_len: usize = 0;
-    let mut has_data = false;
+    let archive_origin = r.stream_position()?;
+    let file_end = r.seek(SeekFrom::End(0))?;
 
-    loop {
-        // Record file position before reading so we can compute exact seek targets.
-        let chunk_file_pos = r.stream_position()?;
-        let n = r.read(&mut buf[overlap_len..overlap_len + CHUNK])?;
-        if n == 0 {
-            break;
-        }
-        has_data = true;
-        let total = overlap_len + n;
-        // buf[0..overlap_len] = tail of previous chunk (file pos: chunk_file_pos - overlap_len)
-        // buf[overlap_len..total] = newly read bytes (file pos: chunk_file_pos .. chunk_file_pos + n)
-        let buf_base = chunk_file_pos - overlap_len as u64;
-
-        // Search for the 6-byte escape sequence.
-        if let Some(i) = buf[..total].windows(SEQT_CATALOGUE.len()).position(|w| w == SEQT_CATALOGUE) {
-            r.seek(SeekFrom::Start(buf_base + i as u64 + SEQT_CATALOGUE.len() as u64))?;
-            return Ok(true);
-        }
-
-        // Search for the 10-byte archive label.
-        if use_label {
-            if let Some(i) = buf[..total].windows(label.len()).position(|w| w == label.as_ref()) {
-                r.seek(SeekFrom::Start(buf_base + i as u64 + label.len() as u64))?;
-                return Ok(false);
-            }
-        }
-
-        // Carry the last OVERLAP bytes into the next iteration.
-        let keep = OVERLAP.min(total);
-        buf.copy_within(total - keep..total, 0);
-        overlap_len = keep;
-    }
-
-    if !has_data {
+    if file_end <= archive_origin {
         return Err(DarError::Corrupt("archive body too short".into()));
     }
+
+    // Jump to at most TAIL bytes before end; for small files this equals archive_origin.
+    const TAIL: u64 = 256 * 1024 * 1024;
+    let tail_start = archive_origin.max(file_end.saturating_sub(TAIL));
+    r.seek(SeekFrom::Start(tail_start))?;
+
+    if let Some(result) = scan_window(r, label, use_label)? {
+        return Ok(result);
+    }
+
+    // Tail scan missed.  Fall back to a full scan from archive_origin.
+    if tail_start > archive_origin {
+        r.seek(SeekFrom::Start(archive_origin))?;
+        if let Some(result) = scan_window(r, label, use_label)? {
+            return Ok(result);
+        }
+    }
+
     Err(DarError::Corrupt("seqt_catalogue not found".into()))
 }
 
@@ -360,18 +386,33 @@ fn skip<R: Seek>(r: &mut R, n: u64) -> Result<(), DarError> {
     Ok(())
 }
 
-/// Read the inode flags byte and seek past the remaining fixed-size fields.
+/// Skip one DAR timestamp field.
 ///
-/// Base layout (31 bytes when bit 4 clear, 41 bytes when bit 4 set):
-///   flags(1) + uid(5) + gid(5) + perms(2) + ctime(6) + mtime(6) + atime(6)
-///   [+ nlink(5) + field9(5) only when (flags >> 4) & 1 == 1]
+/// Timestamps are prefixed with a type byte:
+/// - `'s'` (0x73) and others: seconds only — one 5-byte infinint follows
+/// - `'n'` (0x6e): nanosecond precision — two 5-byte infinints follow (seconds + nanoseconds)
+fn skip_timestamp<R: Read + Seek>(r: &mut R) -> Result<(), DarError> {
+    let ts_type = read_u8(r)?;
+    if ts_type == b'n' {
+        skip(r, 10) // seconds(5) + nanoseconds(5)
+    } else {
+        skip(r, 5)  // seconds(5) only
+    }
+}
+
+/// Read the inode flags byte and seek past the remaining inode fields.
+///
+/// Base layout: flags(1) + uid(5) + gid(5) + perms(2) + ctime + mtime + atime
+///   Each timestamp: type_byte(1) + seconds(5) [+ nanoseconds(5) if type=='n']
+///   Optional: nlink(5) + field9(5) when (flags >> 4) & 1 == 1
 fn read_inode_base<R: Read + Seek>(r: &mut R) -> Result<u8, DarError> {
     let flags = read_u8(r)?;
-    // uid(5)+gid(5)+perms(2)+ctime(6)+mtime(6)+atime(6) = 30 bytes always present
-    skip(r, 30)?;
-    // nlink and field9 only present when bit 4 is set
+    skip(r, 12)?; // uid(5) + gid(5) + perms(2)
+    skip_timestamp(r)?; // ctime
+    skip_timestamp(r)?; // mtime
+    skip_timestamp(r)?; // atime
     if (flags >> 4) & 1 != 0 {
-        skip(r, 10)?;
+        skip(r, 10)?; // nlink(5) + field9(5)
     }
     Ok(flags)
 }
