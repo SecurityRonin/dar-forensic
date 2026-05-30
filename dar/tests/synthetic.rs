@@ -235,6 +235,58 @@ fn catalog_invalid_utf8_filename_returns_corrupt() {
     ));
 }
 
+// ── catalog: label-only marker (no seqt_catalogue escape) ─────────────────────
+
+/// A DAR archive whose catalog begins with the 10-byte archive label and has no
+/// seqt_catalogue escape sequence.  The parser must fall back to a label scan.
+///
+/// This is the format produced by Passware Mobile.
+#[test]
+fn catalog_without_escape_lists_entries() {
+    const LABEL: [u8; 10] = [0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A];
+
+    let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b]; // magic
+    buf.extend_from_slice(&LABEL);                  // internal_name
+    buf.extend_from_slice(&[0x00, 0x00]);            // flag + ext_char
+    buf.extend_from_slice(&inf(0));                  // TLV count = 0 → archive_origin = 21
+
+    // File data — use non-zero bytes so the label won't false-match in the body.
+    buf.extend_from_slice(b"FFFFFFFFFFFFFFFF"); // 16 distinct bytes
+
+    // Catalog header: label only, no escape, no path NUL.
+    buf.extend_from_slice(&LABEL);
+    buf.extend(root_dir());
+    buf.extend(file_entry("a.txt", 0, b'n', 0, 16));
+    buf.push(EOD);
+
+    let r = DarReader::open(Cursor::new(buf)).expect("open with label-only catalog");
+    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
+    assert_eq!(paths, ["a.txt"]);
+}
+
+/// Same setup as above but also verifies `extract()` can seek back to the
+/// file data using the catalog's archive_offset.
+#[test]
+fn catalog_without_escape_extracts_correctly() {
+    const LABEL: [u8; 10] = [0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A];
+
+    let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b];
+    buf.extend_from_slice(&LABEL);
+    buf.extend_from_slice(&[0x00, 0x00]);
+    buf.extend_from_slice(&inf(0)); // archive_origin = 21
+
+    buf.extend_from_slice(b"HELLOWORLD"); // 10 bytes of payload at archive_origin
+
+    // Catalog: label only marker.
+    buf.extend_from_slice(&LABEL);
+    buf.extend(root_dir());
+    buf.extend(file_entry("f.bin", 0, b'n', 0, 10));
+    buf.push(EOD);
+
+    let mut r = DarReader::open(Cursor::new(buf)).expect("open");
+    assert_eq!(r.extract("f.bin").expect("extract"), b"HELLOWORLD");
+}
+
 // ── extract correct bytes ─────────────────────────────────────────────────────
 
 /// Verifies archive_origin + archive_offset arithmetic end-to-end.
