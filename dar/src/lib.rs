@@ -173,49 +173,60 @@ impl<R: Read + Seek> DarReader<R> {
 /// (Passware Mobile format: no escape, no path NUL between label and entries).
 ///
 /// Returns `Err(Corrupt)` when neither marker is found.
+///
+/// Both searches run in a single forward pass using 4 MiB chunks so this
+/// remains efficient even on multi-gigabyte forensic archives.
 fn find_catalogue<R: Read + Seek>(r: &mut R, label: &[u8; 10]) -> Result<bool, DarError> {
-    let start_pos = r.stream_position()?;
+    // All-zero labels cannot be used as a reliable catalog marker (too common
+    // in zero-padded archive bodies).  Only attempt label fallback for archives
+    // whose label has at least one non-zero byte.
+    let use_label = !label.iter().all(|&b| b == 0);
 
-    // ── pass 1: escape scan ───────────────────────────────────────────────────
-    let n = SEQT_CATALOGUE.len();
-    let mut window = [0u8; 6];
-    if r.read_exact(&mut window)
-        .map_err(|_| DarError::Corrupt("archive body too short".into()))
-        .is_ok()
-    {
-        loop {
-            if window == SEQT_CATALOGUE {
-                return Ok(true);
-            }
-            window.copy_within(1.., 0);
-            if r.read_exact(&mut window[n - 1..]).is_err() {
-                break; // exhausted — fall through to label scan
-            }
-        }
-    }
-
-    // ── pass 2: label-scan fallback ───────────────────────────────────────────
-    // Only useful when the label is non-trivial (all-zero labels are too common
-    // in zero-filled archive bodies to be reliable markers).
-    if label.iter().all(|&b| b == 0) {
-        return Err(DarError::Corrupt("seqt_catalogue not found".into()));
-    }
-
-    r.seek(SeekFrom::Start(start_pos))?;
-    let mut lwindow = [0u8; 10];
-    r.read_exact(&mut lwindow)
-        .map_err(|_| DarError::Corrupt("seqt_catalogue not found".into()))?;
+    // Single forward pass using 4 MiB chunks.  OVERLAP = max(escape, label) - 1
+    // bytes are carried from the previous chunk so that patterns spanning a
+    // chunk boundary are not missed.
+    const CHUNK: usize = 4 * 1024 * 1024;
+    const OVERLAP: usize = 9; // max(SEQT_CATALOGUE.len(), label.len()) - 1
+    let mut buf = vec![0u8; CHUNK + OVERLAP];
+    let mut overlap_len: usize = 0;
+    let mut has_data = false;
 
     loop {
-        if &lwindow == label {
-            return Ok(false); // reader is now positioned at the first catalog entry
-        }
-        lwindow.copy_within(1.., 0);
-        if r.read_exact(&mut lwindow[9..]).is_err() {
+        // Record file position before reading so we can compute exact seek targets.
+        let chunk_file_pos = r.stream_position()?;
+        let n = r.read(&mut buf[overlap_len..overlap_len + CHUNK])?;
+        if n == 0 {
             break;
         }
+        has_data = true;
+        let total = overlap_len + n;
+        // buf[0..overlap_len] = tail of previous chunk (file pos: chunk_file_pos - overlap_len)
+        // buf[overlap_len..total] = newly read bytes (file pos: chunk_file_pos .. chunk_file_pos + n)
+        let buf_base = chunk_file_pos - overlap_len as u64;
+
+        // Search for the 6-byte escape sequence.
+        if let Some(i) = buf[..total].windows(SEQT_CATALOGUE.len()).position(|w| w == SEQT_CATALOGUE) {
+            r.seek(SeekFrom::Start(buf_base + i as u64 + SEQT_CATALOGUE.len() as u64))?;
+            return Ok(true);
+        }
+
+        // Search for the 10-byte archive label.
+        if use_label {
+            if let Some(i) = buf[..total].windows(label.len()).position(|w| w == label.as_ref()) {
+                r.seek(SeekFrom::Start(buf_base + i as u64 + label.len() as u64))?;
+                return Ok(false);
+            }
+        }
+
+        // Carry the last OVERLAP bytes into the next iteration.
+        let keep = OVERLAP.min(total);
+        buf.copy_within(total - keep..total, 0);
+        overlap_len = keep;
     }
 
+    if !has_data {
+        return Err(DarError::Corrupt("archive body too short".into()));
+    }
     Err(DarError::Corrupt("seqt_catalogue not found".into()))
 }
 
