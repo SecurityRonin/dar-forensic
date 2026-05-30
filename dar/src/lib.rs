@@ -326,7 +326,16 @@ fn parse_catalog<R: Read + Seek>(r: &mut R) -> Result<Vec<EntryRef>, DarError> {
                     encrypted: encryption_flag != 0,
                 });
             }
-            _ => break, // unknown type = slice trailer boundary
+            'l' => {
+                // Symbolic link: inode + NUL-terminated target path; not extractable.
+                let _name = read_nul_string(r)?;
+                let flags = read_inode_base(r)?;
+                if (flags >> 4) & 1 != 0 {
+                    skip_fsa(r)?;
+                }
+                skip_nul_string(r)?; // symlink target
+            }
+            _ => break, // unknown type = slice trailer or unhandled entry
         }
     }
 
