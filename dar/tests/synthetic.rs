@@ -59,6 +59,44 @@ fn subdir(name: &str) -> Vec<u8> {
     v
 }
 
+/// Inode with 'n'-type (nanosecond-precision) timestamps.
+///
+/// Produces 46 bytes for bit4=false:
+///   flags(1) + uid(5) + gid(5) + perms(2)
+///   + [type('n') + sec(5) + ns(5)] × 3 = 13 + 33 = 46
+fn inode_ns(bit4: bool) -> Vec<u8> {
+    let flags = if bit4 { 0x10u8 } else { 0x00 };
+    let mut v = vec![flags];
+    v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // uid
+    v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // gid
+    v.extend_from_slice(&[0x00, 0x00]);                    // perms
+    for _ in 0..3 {
+        v.push(b'n');                                       // type 'n'
+        v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // seconds
+        v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // nanoseconds
+    }
+    if bit4 {
+        v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // nlink
+        v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // field9
+    }
+    v
+}
+
+/// A file catalog entry with nanosecond-precision timestamps (Passware Mobile format).
+fn file_entry_ns(name: &str, enc: u8, comp: u8, archive_offset: u32, size: u32) -> Vec<u8> {
+    let mut v = vec![0x06u8]; // cat_sig → 'f'
+    v.extend_from_slice(name.as_bytes());
+    v.push(0x00);
+    v.extend(inode_ns(false));
+    v.extend_from_slice(&inf(size));
+    v.extend_from_slice(&inf(archive_offset));
+    v.extend_from_slice(&inf(size));
+    v.push(enc);
+    v.push(comp);
+    v.extend_from_slice(&inf(0)); // crc_size = 0
+    v
+}
+
 /// A file catalog entry.
 fn file_entry(name: &str, enc: u8, comp: u8, archive_offset: u32, size: u32) -> Vec<u8> {
     let mut v = vec![0x06u8]; // cat_sig → 'f'
@@ -307,4 +345,38 @@ fn extract_returns_correct_bytes() {
 
     let mut r = DarReader::open(Cursor::new(buf)).expect("open");
     assert_eq!(r.extract("out.bin").expect("extract"), PAYLOAD);
+}
+
+// ── nanosecond-precision ('n') timestamps ─────────────────────────────────────
+
+/// File entries using 'n'-type (nanosecond-precision) timestamps must be listed.
+///
+/// This is the inode format used by Passware Mobile DAR archives.  The inode
+/// is 46 bytes (not 31), because each of the three timestamps stores both
+/// seconds and nanoseconds as separate infinints after the type byte.
+#[test]
+fn nanosecond_timestamp_inode_lists_entry() {
+    let dar = minimal_dar(vec![file_entry_ns("hi.bin", 0, b'n', 0, 0)]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert_eq!(r.entries().len(), 1);
+    assert_eq!(r.entries()[0].path, "hi.bin");
+}
+
+/// Same as above, but also verifies that extract() seeks to the correct offset.
+///
+/// If the inode is mis-parsed (too few bytes consumed), archive_offset is read
+/// from the wrong position and extract() returns garbage or panics.
+#[test]
+fn nanosecond_timestamp_inode_extracts_correctly() {
+    const PAYLOAD: &[u8] = b"ns_payload";
+
+    let mut buf = header();
+    buf.extend_from_slice(PAYLOAD); // at archive_origin (byte 21)
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    buf.extend(file_entry_ns("p.bin", 0, b'n', 0, PAYLOAD.len() as u32));
+    buf.push(EOD);
+
+    let mut r = DarReader::open(Cursor::new(buf)).expect("open");
+    assert_eq!(r.extract("p.bin").expect("extract"), PAYLOAD);
 }
