@@ -96,7 +96,8 @@ impl<R: Read + Seek> DarReader<R> {
             return Err(DarError::NotADar);
         }
 
-        skip(&mut reader, 10)?; // internal_name label
+        let mut label = [0u8; 10];
+        reader.read_exact(&mut label)?; // internal_name label
         skip(&mut reader, 2)?;  // flag + ext_char
 
         // TLV list: infinint(count) then count × (u16 type + infinint len + data)
@@ -113,10 +114,13 @@ impl<R: Read + Seek> DarReader<R> {
         // Everything after the TLV block is addressed by archive_offset.
         let archive_origin = reader.stream_position()?;
 
-        find_catalogue(&mut reader)?;
-
-        skip(&mut reader, 10)?;      // catalog label
-        skip_nul_string(&mut reader)?; // catalog working-directory path
+        // Returns true if the standard escape was found (catalog has label + path prefix),
+        // false if catalog was located via the archive label directly (no prefix to skip).
+        let via_escape = find_catalogue(&mut reader, &label)?;
+        if via_escape {
+            skip(&mut reader, 10)?;      // catalog label
+            skip_nul_string(&mut reader)?; // catalog working-directory path
+        }
 
         let entries = parse_catalog(&mut reader)?;
 
@@ -160,24 +164,59 @@ impl<R: Read + Seek> DarReader<R> {
 
 // ── Catalog parser ────────────────────────────────────────────────────────────
 
-/// Scan forward until the seqt_catalogue escape is found and consumed.
+/// Locate the catalog section and position the reader at its first entry.
 ///
-/// After return the reader is positioned immediately after the 6-byte escape,
-/// at the first byte of the catalog payload.
-fn find_catalogue<R: Read + Seek>(r: &mut R) -> Result<(), DarError> {
+/// Returns `true` when the standard `seqt_catalogue` escape is found — the
+/// caller must then skip the 10-byte in-catalog label and path NUL string.
+///
+/// Returns `false` when the catalog is located via the archive `label` directly
+/// (Passware Mobile format: no escape, no path NUL between label and entries).
+///
+/// Returns `Err(Corrupt)` when neither marker is found.
+fn find_catalogue<R: Read + Seek>(r: &mut R, label: &[u8; 10]) -> Result<bool, DarError> {
+    let start_pos = r.stream_position()?;
+
+    // ── pass 1: escape scan ───────────────────────────────────────────────────
     let n = SEQT_CATALOGUE.len();
     let mut window = [0u8; 6];
-    r.read_exact(&mut window)
-        .map_err(|_| DarError::Corrupt("archive body too short".into()))?;
+    if r.read_exact(&mut window)
+        .map_err(|_| DarError::Corrupt("archive body too short".into()))
+        .is_ok()
+    {
+        loop {
+            if window == SEQT_CATALOGUE {
+                return Ok(true);
+            }
+            window.copy_within(1.., 0);
+            if r.read_exact(&mut window[n - 1..]).is_err() {
+                break; // exhausted — fall through to label scan
+            }
+        }
+    }
+
+    // ── pass 2: label-scan fallback ───────────────────────────────────────────
+    // Only useful when the label is non-trivial (all-zero labels are too common
+    // in zero-filled archive bodies to be reliable markers).
+    if label.iter().all(|&b| b == 0) {
+        return Err(DarError::Corrupt("seqt_catalogue not found".into()));
+    }
+
+    r.seek(SeekFrom::Start(start_pos))?;
+    let mut lwindow = [0u8; 10];
+    r.read_exact(&mut lwindow)
+        .map_err(|_| DarError::Corrupt("seqt_catalogue not found".into()))?;
 
     loop {
-        if window == SEQT_CATALOGUE {
-            return Ok(());
+        if &lwindow == label {
+            return Ok(false); // reader is now positioned at the first catalog entry
         }
-        window.copy_within(1.., 0);
-        r.read_exact(&mut window[n - 1..])
-            .map_err(|_| DarError::Corrupt("seqt_catalogue not found".into()))?;
+        lwindow.copy_within(1.., 0);
+        if r.read_exact(&mut lwindow[9..]).is_err() {
+            break;
+        }
     }
+
+    Err(DarError::Corrupt("seqt_catalogue not found".into()))
 }
 
 /// Parse all catalog entries, returning file entries with their extraction info.
@@ -419,24 +458,41 @@ mod tests {
 
     #[test]
     fn find_catalogue_body_too_short() {
-        // Fewer than 6 bytes — can't fill the initial window.
-        let err = find_catalogue(&mut Cursor::new(&[0x01u8, 0x02, 0x03][..])).unwrap_err();
-        assert!(matches!(&err, DarError::Corrupt(s) if s == "archive body too short"));
+        // Fewer than 6 bytes — can't fill the initial window; label also too short.
+        let label = [0u8; 10];
+        let err = find_catalogue(&mut Cursor::new(&[0x01u8, 0x02, 0x03][..]), &label)
+            .unwrap_err();
+        assert!(matches!(&err, DarError::Corrupt(s) if s == "archive body too short"
+            || s == "seqt_catalogue not found"));
     }
 
     #[test]
     fn find_catalogue_escape_at_start() {
         let mut data = vec![0xAD, 0xFD, 0xEA, 0x77, 0x21, 0x43, 0xFF];
         let mut c = Cursor::new(&mut data[..]);
-        find_catalogue(&mut c).unwrap();
+        let via_escape = find_catalogue(&mut c, &[0u8; 10]).unwrap();
+        assert!(via_escape);
         assert_eq!(c.position(), 6);
     }
 
     #[test]
     fn find_catalogue_escape_not_found() {
-        // 10 bytes of zeros — escape never appears.
-        let err = find_catalogue(&mut Cursor::new(&[0u8; 10][..])).unwrap_err();
+        // 10 bytes of zeros, label is 0xFF×10 so label scan also fails.
+        let label = [0xFFu8; 10];
+        let err = find_catalogue(&mut Cursor::new(&[0u8; 10][..]), &label).unwrap_err();
         assert!(matches!(&err, DarError::Corrupt(s) if s == "seqt_catalogue not found"));
+    }
+
+    #[test]
+    fn find_catalogue_label_fallback() {
+        let label: [u8; 10] = [0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A];
+        // Prefix junk (no escape) followed by the label bytes.
+        let mut data = vec![0x00u8; 5];
+        data.extend_from_slice(&label);
+        let mut c = Cursor::new(data);
+        let via_escape = find_catalogue(&mut c, &label).unwrap();
+        assert!(!via_escape);
+        assert_eq!(c.position(), 15); // 5 junk + 10 label consumed
     }
 
     // ── skip ──────────────────────────────────────────────────────────────────
