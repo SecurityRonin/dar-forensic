@@ -380,3 +380,32 @@ fn nanosecond_timestamp_inode_extracts_correctly() {
     let mut r = DarReader::open(Cursor::new(buf)).expect("open");
     assert_eq!(r.extract("p.bin").expect("extract"), PAYLOAD);
 }
+
+// ── symlink entries ───────────────────────────────────────────────────────────
+
+/// A symlink catalog entry (cat_sig → 'l').
+fn symlink_entry(name: &str, target: &str) -> Vec<u8> {
+    let mut v = vec![0x0cu8]; // cat_sig → 'l'
+    v.extend_from_slice(name.as_bytes());
+    v.push(0x00);
+    v.extend(inode_base(false));
+    v.extend_from_slice(target.as_bytes());
+    v.push(0x00);
+    v
+}
+
+/// A symlink between two regular files must not stop catalog parsing.
+///
+/// Symlinks are leaf nodes (not extractable) so they must be silently skipped
+/// while parsing continues to the entries that follow.
+#[test]
+fn symlink_entry_does_not_stop_parsing() {
+    let dar = minimal_dar(vec![
+        file_entry("before.txt", 0, b'n', 0, 0),
+        symlink_entry("link.txt", "/etc/target"),
+        file_entry("after.txt", 0, b'n', 0, 0),
+    ]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
+    assert_eq!(paths, ["before.txt", "after.txt"]);
+}
