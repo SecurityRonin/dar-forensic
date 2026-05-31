@@ -464,6 +464,23 @@ mod tests {
         assert!(matches!(err, DarError::Io(_)));
     }
 
+    #[test]
+    fn infinint_0x40_preamble_reads_8_data_bytes() {
+        // 0x40 terminal: leading_zeros=1, pos=1, data_bytes=(0*8+1+1)*4=8
+        // Encodes the value 0x5d15_9331 in 8 big-endian bytes.
+        let mut data = vec![0x40u8];
+        data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x5d, 0x15, 0x93, 0x31]);
+        assert_eq!(read_infinint(&mut Cursor::new(data)).unwrap(), 0x5d15_9331u64);
+    }
+
+    #[test]
+    fn infinint_multi_bit_terminal_returns_corrupt() {
+        // 0x60 = 0110_0000 — two bits set, not a valid terminal.
+        let data = [0x60u8, 0x00, 0x00, 0x00, 0x00];
+        let err = read_infinint(&mut Cursor::new(&data[..])).unwrap_err();
+        assert!(matches!(&err, DarError::Corrupt(_)));
+    }
+
     // ── read_u8 ───────────────────────────────────────────────────────────────
 
     #[test]

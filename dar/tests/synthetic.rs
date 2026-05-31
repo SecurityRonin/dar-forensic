@@ -394,6 +394,59 @@ fn symlink_entry(name: &str, target: &str) -> Vec<u8> {
     v
 }
 
+// ── large infinint timestamps (0x40 encoding) ────────────────────────────────
+
+/// Inode where ctime uses a 0x40-encoded 8-byte infinint for the seconds value.
+///
+/// This is the real-world encoding seen in Passware Mobile archives when the
+/// timestamp epoch value exceeds 32 bits and DAR chooses the next-larger
+/// infinint group (0x40 terminal → 8 data bytes instead of the usual 4).
+fn inode_large_ctime_ts() -> Vec<u8> {
+    let mut v = vec![0x00u8]; // flags (bit4=0)
+    v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // uid = 0
+    v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // gid = 0
+    v.extend_from_slice(&[0x00, 0x00]);                    // perms = 0
+    // ctime: 'n' type, seconds via 0x40 (8 bytes), nanoseconds via 0x80 (4 bytes)
+    v.push(b'n');
+    v.push(0x40);
+    v.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x5d, 0x15, 0x93, 0x31]); // seconds
+    v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]);                    // nanoseconds
+    // mtime: 's' type, seconds via 0x80
+    v.push(b's');
+    v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]);
+    // atime: 's' type
+    v.push(b's');
+    v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]);
+    v
+}
+
+fn file_entry_large_ts(name: &str) -> Vec<u8> {
+    let mut v = vec![0x06u8]; // cat_sig → 'f'
+    v.extend_from_slice(name.as_bytes());
+    v.push(0x00);
+    v.extend(inode_large_ctime_ts());
+    v.extend_from_slice(&inf(0)); // data_size
+    v.extend_from_slice(&inf(0)); // archive_offset
+    v.extend_from_slice(&inf(0)); // stored_size
+    v.push(0x00);                 // enc = none
+    v.push(b'n');                 // comp = none
+    v.extend_from_slice(&inf(0)); // crc_size = 0
+    v
+}
+
+/// A file entry whose ctime seconds field uses the 0x40 infinint preamble
+/// (8 data bytes) must be listed without error.
+///
+/// This matches the Passware Mobile format where large epoch timestamps require
+/// more than 4 bytes, triggering the next infinint encoding group.
+#[test]
+fn file_with_large_timestamp_infinint_is_parseable() {
+    let dar = minimal_dar(vec![file_entry_large_ts("big_ts.bin")]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert_eq!(r.entries().len(), 1);
+    assert_eq!(r.entries()[0].path, "big_ts.bin");
+}
+
 /// A symlink between two regular files must not stop catalog parsing.
 ///
 /// Symlinks are leaf nodes (not extractable) so they must be silently skipped
