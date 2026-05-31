@@ -344,17 +344,36 @@ fn parse_catalog<R: Read + Seek>(r: &mut R) -> Result<Vec<EntryRef>, DarError> {
 
 // ── Low-level I/O helpers ─────────────────────────────────────────────────────
 
-/// Read a 5-byte DAR infinint: `0x80 XX XX XX XX` → big-endian u32.
+/// Read a DAR variable-length infinint.
+///
+/// Format (TG=4): consume leading `0x00` skip-bytes, then a terminal byte
+/// with exactly one bit set.  `pos = terminal.leading_zeros()`.
+/// `data_bytes = (skip_count * 8 + pos + 1) * 4`.  Then read `data_bytes`
+/// big-endian bytes as the value (truncated to u64 for values > 64 bits).
 fn read_infinint<R: Read>(r: &mut R) -> Result<u64, DarError> {
-    let mut buf = [0u8; 5];
-    r.read_exact(&mut buf)?;
-    if buf[0] != 0x80 {
+    let mut skip: u32 = 0;
+    let terminal = loop {
+        let b = read_u8(r)?;
+        if b == 0x00 {
+            skip += 1;
+        } else {
+            break b;
+        }
+    };
+    if terminal.count_ones() != 1 {
         return Err(DarError::Corrupt(format!(
-            "invalid infinint preamble: 0x{:02x}",
-            buf[0]
+            "invalid infinint terminal: {:#04x}",
+            terminal
         )));
     }
-    Ok(u32::from_be_bytes(buf[1..5].try_into().unwrap()) as u64)
+    let pos = terminal.leading_zeros();
+    let data_bytes = (skip * 8 + pos + 1) * 4;
+    let mut val: u64 = 0;
+    for _ in 0..data_bytes {
+        let b = read_u8(r)?;
+        val = val.wrapping_shl(8) | (b as u64);
+    }
+    Ok(val)
 }
 
 fn read_u8<R: Read>(r: &mut R) -> Result<u8, DarError> {
@@ -398,30 +417,33 @@ fn skip<R: Seek>(r: &mut R, n: u64) -> Result<(), DarError> {
 /// Skip one DAR timestamp field.
 ///
 /// Timestamps are prefixed with a type byte:
-/// - `'s'` (0x73) and others: seconds only — one 5-byte infinint follows
-/// - `'n'` (0x6e): nanosecond precision — two 5-byte infinints follow (seconds + nanoseconds)
+/// - `'s'` (0x73) and others: seconds only — one infinint follows
+/// - `'n'` (0x6e): nanosecond precision — two infinints follow (seconds + nanoseconds)
 fn skip_timestamp<R: Read + Seek>(r: &mut R) -> Result<(), DarError> {
     let ts_type = read_u8(r)?;
+    read_infinint(r)?;
     if ts_type == b'n' {
-        skip(r, 10) // seconds(5) + nanoseconds(5)
-    } else {
-        skip(r, 5)  // seconds(5) only
+        read_infinint(r)?;
     }
+    Ok(())
 }
 
 /// Read the inode flags byte and seek past the remaining inode fields.
 ///
-/// Base layout: flags(1) + uid(5) + gid(5) + perms(2) + ctime + mtime + atime
-///   Each timestamp: type_byte(1) + seconds(5) [+ nanoseconds(5) if type=='n']
-///   Optional: nlink(5) + field9(5) when (flags >> 4) & 1 == 1
+/// Base layout: flags(1) + uid(inf) + gid(inf) + perms(2) + ctime + mtime + atime
+///   Each timestamp: type_byte(1) + seconds(inf) [+ nanoseconds(inf) if type=='n']
+///   Optional: nlink(inf) + field9(inf) when (flags >> 4) & 1 == 1
 fn read_inode_base<R: Read + Seek>(r: &mut R) -> Result<u8, DarError> {
     let flags = read_u8(r)?;
-    skip(r, 12)?; // uid(5) + gid(5) + perms(2)
+    read_infinint(r)?; // uid
+    read_infinint(r)?; // gid
+    skip(r, 2)?;       // perms (always a 2-byte big-endian u16, never an infinint)
     skip_timestamp(r)?; // ctime
     skip_timestamp(r)?; // mtime
     skip_timestamp(r)?; // atime
     if (flags >> 4) & 1 != 0 {
-        skip(r, 10)?; // nlink(5) + field9(5)
+        read_infinint(r)?; // nlink
+        read_infinint(r)?; // field9
     }
     Ok(flags)
 }
@@ -452,9 +474,10 @@ mod tests {
 
     #[test]
     fn infinint_bad_preamble_returns_corrupt() {
-        let data = [0x01u8, 0x00, 0x00, 0x00, 0x00];
+        // 0x03 = two bits set — not a valid infinint terminal.
+        let data = [0x03u8, 0x00, 0x00, 0x00, 0x00];
         let err = read_infinint(&mut Cursor::new(&data[..])).unwrap_err();
-        assert!(matches!(&err, DarError::Corrupt(s) if s.contains("preamble")));
+        assert!(matches!(&err, DarError::Corrupt(_)));
     }
 
     #[test]
@@ -593,10 +616,16 @@ mod tests {
 
     #[test]
     fn inode_base_bit4_clear_reads_31_bytes() {
-        // flags=0x00 (bit4 clear) + 30 bytes
-        let mut data = vec![0x00u8]; // flags
-        data.extend_from_slice(&[0xAA; 30]);
-        data.push(0xFF); // sentinel
+        // flags(1) + uid(5) + gid(5) + perms(2) + 3×[type(1)+secs(5)] = 31 bytes
+        let mut data = vec![0x00u8]; // flags (bit4=0)
+        data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // uid
+        data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // gid
+        data.extend_from_slice(&[0x00, 0x00]);                    // perms
+        for _ in 0..3 {
+            data.push(b's');                                       // timestamp type
+            data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // seconds
+        }
+        data.push(0xFF); // sentinel — must not be consumed
         let mut c = Cursor::new(data);
         assert_eq!(read_inode_base(&mut c).unwrap(), 0x00);
         assert_eq!(c.position(), 31);
@@ -604,9 +633,17 @@ mod tests {
 
     #[test]
     fn inode_base_bit4_set_reads_41_bytes() {
-        // flags=0x10 (bit4 set) + 30 bytes + 10 bytes
-        let mut data = vec![0x10u8]; // flags
-        data.extend_from_slice(&[0xAA; 40]);
+        // flags(1) + uid(5) + gid(5) + perms(2) + 3×[type(1)+secs(5)] + nlink(5) + field9(5) = 41
+        let mut data = vec![0x10u8]; // flags (bit4=1)
+        data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // uid
+        data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // gid
+        data.extend_from_slice(&[0x00, 0x00]);                    // perms
+        for _ in 0..3 {
+            data.push(b's');
+            data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]);
+        }
+        data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // nlink
+        data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // field9
         data.push(0xFF); // sentinel
         let mut c = Cursor::new(data);
         assert_eq!(read_inode_base(&mut c).unwrap(), 0x10);

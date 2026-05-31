@@ -17,9 +17,16 @@ fn inf(n: u32) -> [u8; 5] {
 fn inode_base(bit4: bool) -> Vec<u8> {
     let flags = if bit4 { 0x10u8 } else { 0x00 };
     let mut v = vec![flags];
-    v.extend_from_slice(&[0u8; 30]);
+    v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // uid
+    v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // gid
+    v.extend_from_slice(&[0x00, 0x00]);                    // perms
+    for _ in 0..3 {
+        v.push(b's');                                       // timestamp type
+        v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // seconds
+    }
     if bit4 {
-        v.extend_from_slice(&[0u8; 10]); // nlink + field9
+        v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // nlink
+        v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // field9
     }
     v
 }
@@ -140,7 +147,7 @@ fn corrupt_infinint_in_header_preserves_cause() {
     let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b]; // magic
     buf.extend_from_slice(&[0u8; 10]);              // label
     buf.extend_from_slice(&[0x00, 0x00]);           // flag + ext_char
-    buf.push(0x01);                                 // bad preamble — not 0x80
+    buf.push(0x03);                                 // invalid terminal — two bits set
     buf.extend_from_slice(&[0x00u8; 4]);
 
     let err = match DarReader::open(Cursor::new(buf)) {
@@ -148,8 +155,8 @@ fn corrupt_infinint_in_header_preserves_cause() {
         Ok(_) => panic!("expected Err, got Ok"),
     };
     assert!(
-        matches!(&err, DarError::Corrupt(s) if s.contains("preamble") || s.contains("infinint")),
-        "expected Corrupt mentioning preamble/infinint, got: {err}"
+        matches!(&err, DarError::Corrupt(s) if s.contains("terminal") || s.contains("infinint")),
+        "expected Corrupt mentioning terminal/infinint, got: {err}"
     );
 }
 
