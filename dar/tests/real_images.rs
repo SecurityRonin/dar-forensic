@@ -96,7 +96,7 @@ fn v9_lists_one_entry() {
 
 #[test]
 fn v9_entry_path() {
-    assert_eq!(open_v9().entries()[0].path, "files/hello.txt");
+    assert_eq!(open_v9().entries()[0].path, "root/files/hello.txt");
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn v9_entry_size_is_15() {
 #[test]
 fn v9_extracts_hello_txt() {
     let mut r = open_v9();
-    let data = r.extract("files/hello.txt").expect("extract");
+    let data = r.extract("root/files/hello.txt").expect("extract");
     assert_eq!(data, b"hello format 9\n");
 }
 

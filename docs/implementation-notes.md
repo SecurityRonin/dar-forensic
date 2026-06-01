@@ -181,4 +181,81 @@ File-specific catalog fields (after inode + optional FSA):
 [1]   compression_char           — 'n' = none
 [5]   crc_size        (infinint)
 [N]   crc_data        (crc_size bytes)
+
+---
+
+## 7. Infinint encoding — full variable-length spec
+
+The 5-byte `0x80 XX XX XX XX` form described in §1 is only the most common
+case.  DAR uses a general TG=4 variable-length encoding:
+
+1. Consume leading `0x00` **skip bytes** (each adds 8 to the group count).
+2. The first non-zero byte is the **terminal**.  It must have exactly one bit
+   set; any other value is a format error.
+3. `pos = terminal.leading_zeros()` (0-indexed from MSB).
+4. `data_bytes = (skip_count × 8 + pos + 1) × 4`
+5. Read `data_bytes` big-endian bytes as the integer value.
+
+Common cases:
+
+```
+terminal  skip  pos  data_bytes  typical use
+0x80       0    0        4       small values (uid, gid, size < 2^32)
+0x40       0    1        8       timestamps with epoch > 2^32
+0x20       0    2       12       very large sizes (rare)
+0x00 0x80  1    0       36       theoretical maximum for 1 skip byte
+```
+
+The `0x80` case coincides with the §1 description: terminal `0x80`,
+`data_bytes = 4`, value is a big-endian u32.
+
+**Empirically confirmed:** Passware Kit Mobile 2026 v3.0 produces DAR v9
+archives (`version_string = "090"`) where `ctime` seconds fields use the
+`0x40` terminal (8 data bytes) for timestamps with epoch values that exceed
+32 bits.  Parsing fails if only `0x80` is accepted.
+
+---
+
+## 8. `version_string` encoding
+
+Every byte in the `version_string` field is stored as `raw_value + 48` (an
+ASCII offset, not a text digit).  The 3-byte (+ NUL) layout is:
+
+```
+byte 0 = (version / 256) + 48
+byte 1 = (version % 256) + 48
+byte 2 = fix              + 48
+NUL
+```
+
+`version` is a single monotonically-increasing integer (not major.minor).
+`fix` is a sub-revision for bug-fix-only format changes.
+
+Decoding examples:
+
+| On-disk bytes | Decode | DAR format |
+|---------------|--------|------------|
+| `"090"`       | `0×256 + (57−48) = 9`, fix `0` | **format 9** |
+| `"0;3"`       | `0×256 + (59−48) = 11`, fix `3` | **format 11.3** |
+| `"080"`       | `0×256 + (56−48) = 8`, fix `0` | format 8 |
+
+The semicolon in `"0;3"` is incidental — ASCII 59 = 11 + 48, not a
+separator.  The format is purely numeric.
+
+---
+
+## 9. Validated corpus
+
+| File | `version_string` | DAR format | Created by | Entries |
+|------|-----------------|-----------|------------|---------|
+| `dar/tests/data/v11_hello.dar` | `"0;3"` | **11.3** | dar 2.8.5 on macOS (Apple Silicon) | 1 |
+| `userdata.1.dar` (confidential) | `"090"` | **9** | Passware Kit Mobile 2026 v3.0 | 637,698 |
+
+`v11_hello.dar`: standard `seqt_catalogue` escape; used for offset arithmetic
+verification.
+
+`userdata.1.dar`: no `seqt_catalogue` escape; catalog located via archive
+label scan; timestamps use `0x40` infinint encoding; `cmd_line` field = "N/A".
+
+Both archives share DAR magic `0x0000007b` and the same cat_sig encoding.
 ```

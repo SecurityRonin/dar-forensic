@@ -418,6 +418,8 @@ fn catalog_open_no_path() -> Vec<u8> {
 #[test]
 fn catalog_without_nul_path_lists_entries() {
     let mut buf = header();
+    // Format-9 version string (each byte = value+48): '0'=0×256, '9'=9, '0'=fix 0
+    buf.extend_from_slice(b"090\x00");
     buf.extend(catalog_open_no_path());
     buf.extend(root_dir());
     buf.extend(file_entry("f9.txt", 0, b'n', 0, 0));

@@ -114,12 +114,31 @@ impl<R: Read + Seek> DarReader<R> {
         // Everything after the TLV block is addressed by archive_offset.
         let archive_origin = reader.stream_position()?;
 
+        // Read the format version string (NUL-terminated, at archive_origin).
+        // Encoding: each byte = value + 48.  Two bytes encode: major = b[0]*256 + b[1].
+        // Format 9 ("090") has no working-directory path in the catalog header;
+        // format 10+ includes one.  Seek back so find_catalogue scans from archive_origin.
+        let version_str = read_nul_string(&mut reader).unwrap_or_default();
+        let format_version: u32 = {
+            let b = version_str.as_bytes();
+            if b.len() >= 2 {
+                (b[0].saturating_sub(48) as u32) * 256 + (b[1].saturating_sub(48) as u32)
+            } else {
+                u32::MAX // unrecognised — assume modern format (has path field)
+            }
+        };
+        reader.seek(SeekFrom::Start(archive_origin))?;
+
         // Returns true if the standard escape was found (catalog has label + path prefix),
         // false if catalog was located via the archive label directly (no prefix to skip).
         let via_escape = find_catalogue(&mut reader, &label)?;
         if via_escape {
-            skip(&mut reader, 10)?;      // catalog label
-            skip_nul_string(&mut reader)?; // catalog working-directory path
+            skip(&mut reader, 10)?; // catalog label
+            // Format 9 and earlier have no working-directory path field.
+            // Format 10+ include a NUL-terminated path (possibly non-empty).
+            if format_version >= 10 {
+                skip_nul_string(&mut reader)?;
+            }
         }
 
         let entries = parse_catalog(&mut reader)?;
