@@ -401,6 +401,32 @@ fn symlink_entry(name: &str, target: &str) -> Vec<u8> {
     v
 }
 
+// ── catalog: no NUL path after seqt_catalogue (format 9 style) ───────────────
+
+/// seqt_catalogue + label, but no NUL-terminated path before entries.
+///
+/// DAR format 9 archives omit the working-directory path field from the
+/// catalog header.  Format 11 uses an empty NUL-terminated path `"\0"`.
+fn catalog_open_no_path() -> Vec<u8> {
+    let mut v = vec![0xAD, 0xFD, 0xEA, 0x77, 0x21, 0x43]; // seqt_catalogue
+    v.extend_from_slice(&[0u8; 10]);                        // label (no path NUL follows)
+    v
+}
+
+/// A DAR archive whose catalog header has no NUL path (format 9 style) must
+/// still list its entries correctly.
+#[test]
+fn catalog_without_nul_path_lists_entries() {
+    let mut buf = header();
+    buf.extend(catalog_open_no_path());
+    buf.extend(root_dir());
+    buf.extend(file_entry("f9.txt", 0, b'n', 0, 0));
+    buf.push(EOD);
+    let r = DarReader::open(Cursor::new(buf)).expect("open");
+    assert_eq!(r.entries().len(), 1);
+    assert_eq!(r.entries()[0].path, "f9.txt");
+}
+
 // ── large infinint timestamps (0x40 encoding) ────────────────────────────────
 
 /// Inode where ctime uses a 0x40-encoded 8-byte infinint for the seconds value.
