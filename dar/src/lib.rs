@@ -683,4 +683,70 @@ mod tests {
         skip_fsa(&mut c).unwrap();
         assert_eq!(c.position(), 13); // 5 + 5 + 3 = 13
     }
+
+    // ── hardening: malicious / corrupted infinint encodings ───────────────────
+    //
+    // A `u64` holds at most 8 data bytes.  The reader's contract is "decode to
+    // u64 or return Corrupt" — it must never silently truncate an over-wide
+    // value, overflow while computing the byte count, or loop on a zero run.
+
+    #[test]
+    fn infinint_leading_zero_byte_returns_corrupt() {
+        // A leading 0x00 skip-byte implies a ≥36-byte group — far beyond u64.
+        // Must be rejected as Corrupt, not mislabelled as an I/O shortage.
+        let data = [0x00u8, 0x80, 0x00, 0x00, 0x00, 0x00];
+        let err = read_infinint(&mut Cursor::new(&data[..])).unwrap_err();
+        assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn infinint_12_byte_group_exceeds_u64_returns_corrupt() {
+        // 0x20 terminal → pos=2 → 12 data bytes → cannot fit in u64.
+        // Must error rather than silently truncate to a wrong value.
+        let mut data = vec![0x20u8];
+        data.extend_from_slice(&[0x11; 12]);
+        let err = read_infinint(&mut Cursor::new(data)).unwrap_err();
+        assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn infinint_all_zero_run_returns_corrupt_without_hanging() {
+        // A run of zero bytes must terminate promptly with Corrupt, never spin
+        // consuming the whole stream (and never overflow-panic the skip count).
+        let data = vec![0u8; 4096];
+        let err = read_infinint(&mut Cursor::new(data)).unwrap_err();
+        assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+    }
+
+    // ── hardening: unbounded NUL-terminated strings ───────────────────────────
+
+    #[test]
+    fn nul_string_without_terminator_is_length_bounded() {
+        // No NUL in 200 KiB of data: must be rejected once the path cap is hit,
+        // not grow the buffer until EOF (or OOM on a multi-GiB stream).
+        let data = vec![b'A'; 200_000];
+        let err = read_nul_string(&mut Cursor::new(data)).unwrap_err();
+        assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn skip_nul_string_without_terminator_is_length_bounded() {
+        let data = vec![b'A'; 200_000];
+        let err = skip_nul_string(&mut Cursor::new(data)).unwrap_err();
+        assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+    }
+
+    // ── hardening: skip must never seek backwards ─────────────────────────────
+
+    #[test]
+    fn skip_value_above_i64_max_returns_corrupt() {
+        // n > i64::MAX casts to a negative i64 → SeekFrom::Current would seek
+        // *backwards* on a File (re-reading earlier bytes).  Must be rejected,
+        // and the stream position must not move.
+        let mut c = Cursor::new(vec![0u8; 64]);
+        c.set_position(32);
+        let err = skip(&mut c, 0x8000_0000_0000_0000).unwrap_err();
+        assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+        assert_eq!(c.position(), 32, "position must not move on a rejected skip");
+    }
 }

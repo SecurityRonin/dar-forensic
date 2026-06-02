@@ -497,3 +497,84 @@ fn symlink_entry_does_not_stop_parsing() {
     let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
     assert_eq!(paths, ["before.txt", "after.txt"]);
 }
+
+// ── hardening: malicious / corrupted catalog fields ──────────────────────────
+//
+// Every length and offset in a catalog entry is attacker-controlled: a forensic
+// tool must treat a `.dar` as hostile input.  These tests feed deliberately
+// malicious entries and require a graceful `Err`, never a panic, a backward
+// seek, or an out-of-memory abort.
+
+/// Encode a `u64` as an 8-byte (`0x40`-terminal) infinint — the widest value
+/// that still fits the reader's 64-bit contract.
+fn inf64(n: u64) -> Vec<u8> {
+    let mut v = vec![0x40u8];
+    v.extend_from_slice(&n.to_be_bytes());
+    v
+}
+
+/// A file entry with caller-controlled 64-bit `archive_offset` and
+/// `stored_size`, for exercising extraction bounds checks.  Logical size,
+/// encryption, compression and CRC are all benign so `open()` succeeds and the
+/// entry is listed; only the extraction-path fields are weaponised.
+fn file_entry_raw_sizes(name: &str, archive_offset: u64, stored_size: u64) -> Vec<u8> {
+    let mut v = vec![0x06u8]; // cat_sig → 'f'
+    v.extend_from_slice(name.as_bytes());
+    v.push(0x00);
+    v.extend(inode_base(false));
+    v.extend_from_slice(&inf(0)); // logical size = 0
+    v.extend(inf64(archive_offset)); // archive_offset (64-bit)
+    v.extend(inf64(stored_size)); // stored_size (64-bit)
+    v.push(0x00); // encryption = none
+    v.push(b'n'); // compression = none
+    v.extend_from_slice(&inf(0)); // crc_size = 0
+    v
+}
+
+/// `archive_origin + archive_offset` must not overflow-panic; an offset of
+/// `u64::MAX` must be rejected as corrupt.
+#[test]
+fn extract_archive_offset_overflow_returns_corrupt() {
+    let mut buf = header();
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    buf.extend(file_entry_raw_sizes("evil.bin", u64::MAX, 0));
+    buf.push(EOD);
+
+    let mut r = DarReader::open(Cursor::new(buf)).expect("open");
+    let err = r.extract("evil.bin").unwrap_err();
+    assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+}
+
+/// A `stored_size` larger than the bytes actually present must be rejected as
+/// corrupt — not surface as an I/O short-read after a needless allocation.
+#[test]
+fn extract_stored_size_beyond_archive_returns_corrupt() {
+    let mut buf = header();
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    // Valid offset, but claims 1 MiB of stored bytes that do not exist.
+    buf.extend(file_entry_raw_sizes("toobig.bin", 0, 1 << 20));
+    buf.push(EOD);
+
+    let mut r = DarReader::open(Cursor::new(buf)).expect("open");
+    let err = r.extract("toobig.bin").unwrap_err();
+    assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+}
+
+/// A `stored_size` of `u64::MAX` must be rejected *before* allocating — the
+/// classic decompression/extraction bomb.  Without a bounds check the
+/// `vec![0u8; stored_size]` request aborts the process; with one it returns
+/// `Corrupt` having allocated nothing.
+#[test]
+fn extract_gigantic_stored_size_does_not_allocate() {
+    let mut buf = header();
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    buf.extend(file_entry_raw_sizes("bomb.bin", 0, u64::MAX));
+    buf.push(EOD);
+
+    let mut r = DarReader::open(Cursor::new(buf)).expect("open");
+    let err = r.extract("bomb.bin").unwrap_err();
+    assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+}
