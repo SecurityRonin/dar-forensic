@@ -173,8 +173,31 @@ impl<R: Read + Seek> DarReader<R> {
             )));
         }
 
-        self.inner
-            .seek(SeekFrom::Start(self.archive_origin + entry.archive_offset))?;
+        // The raw bytes live at archive_origin + archive_offset.  Both fields
+        // are attacker-controlled, so the sum must be checked, and the claimed
+        // size validated against the bytes that actually exist before any
+        // allocation — otherwise a forged stored_size is an allocation bomb.
+        let start = self
+            .archive_origin
+            .checked_add(entry.archive_offset)
+            .ok_or_else(|| {
+                DarError::Corrupt(format!("'{path}' archive offset overflows file position"))
+            })?;
+        let end = self.inner.seek(SeekFrom::End(0))?;
+        if start > end {
+            return Err(DarError::Corrupt(format!(
+                "'{path}' starts at {start}, past archive end {end}"
+            )));
+        }
+        let available = end - start;
+        if entry.stored_size > available {
+            return Err(DarError::Corrupt(format!(
+                "'{path}' claims {} stored bytes but only {available} remain",
+                entry.stored_size
+            )));
+        }
+
+        self.inner.seek(SeekFrom::Start(start))?;
         let mut data = vec![0u8; entry.stored_size as usize];
         self.inner.read_exact(&mut data)?;
         Ok(data)
@@ -363,34 +386,43 @@ fn parse_catalog<R: Read + Seek>(r: &mut R) -> Result<Vec<EntryRef>, DarError> {
 
 // ── Low-level I/O helpers ─────────────────────────────────────────────────────
 
-/// Read a DAR variable-length infinint.
+/// Read a DAR variable-length infinint, decoded to `u64`.
 ///
-/// Format (TG=4): consume leading `0x00` skip-bytes, then a terminal byte
-/// with exactly one bit set.  `pos = terminal.leading_zeros()`.
-/// `data_bytes = (skip_count * 8 + pos + 1) * 4`.  Then read `data_bytes`
-/// big-endian bytes as the value (truncated to u64 for values > 64 bits).
+/// Format (TG=4): optional leading `0x00` skip-bytes, then a terminal byte
+/// with exactly one bit set; `pos = terminal.leading_zeros()` and the value
+/// occupies `(skip_count * 8 + pos + 1) * 4` big-endian bytes.
+///
+/// A `u64` holds at most 8 data bytes.  Any encoding wider than that — i.e.
+/// *any* leading `0x00` (which alone implies ≥ 36 bytes) or a terminal below
+/// `0x40` (`pos > 1`) — cannot be represented and is rejected as `Corrupt`
+/// rather than silently truncated.  This single bound also removes the
+/// `(skip * 8 …)` arithmetic-overflow panic and caps the leading-zero scan, so
+/// a malicious all-zero run can never spin or overflow the skip counter.
 fn read_infinint<R: Read>(r: &mut R) -> Result<u64, DarError> {
-    let mut skip: u32 = 0;
-    let terminal = loop {
-        let b = read_u8(r)?;
-        if b == 0x00 {
-            skip += 1;
-        } else {
-            break b;
-        }
-    };
+    let terminal = read_u8(r)?;
+    if terminal == 0x00 {
+        // A skip-byte group is at least 36 data bytes — far beyond u64.
+        return Err(DarError::Corrupt(
+            "infinint exceeds 64-bit range (multi-group encoding)".into(),
+        ));
+    }
     if terminal.count_ones() != 1 {
         return Err(DarError::Corrupt(format!(
-            "invalid infinint terminal: {:#04x}",
-            terminal
+            "invalid infinint terminal: {terminal:#04x}"
         )));
     }
-    let pos = terminal.leading_zeros();
-    let data_bytes = (skip * 8 + pos + 1) * 4;
+    let pos = terminal.leading_zeros(); // 0 ..= 7
+    if pos > 1 {
+        // data_bytes = (pos + 1) * 4 > 8 → does not fit in u64.
+        return Err(DarError::Corrupt(format!(
+            "infinint exceeds 64-bit range: terminal {terminal:#04x} implies {} bytes",
+            (pos + 1) * 4
+        )));
+    }
+    let data_bytes = (pos + 1) * 4; // 4 (terminal 0x80) or 8 (terminal 0x40)
     let mut val: u64 = 0;
     for _ in 0..data_bytes {
-        let b = read_u8(r)?;
-        val = val.wrapping_shl(8) | (b as u64);
+        val = (val << 8) | u64::from(read_u8(r)?);
     }
     Ok(val)
 }
@@ -401,6 +433,11 @@ fn read_u8<R: Read>(r: &mut R) -> Result<u8, DarError> {
     Ok(b[0])
 }
 
+/// Upper bound on a NUL-terminated path/name field.  Real DAR entries stay
+/// well under this; the cap stops a NUL-free region of a hostile archive from
+/// growing the buffer until EOF (or OOM on a multi-GiB stream).
+const MAX_NUL_STRING: usize = 64 * 1024;
+
 /// Read a NUL-terminated UTF-8 string, consuming the NUL byte.
 fn read_nul_string<R: Read>(r: &mut R) -> Result<String, DarError> {
     let mut bytes = Vec::new();
@@ -409,6 +446,11 @@ fn read_nul_string<R: Read>(r: &mut R) -> Result<String, DarError> {
         if b == 0 {
             break;
         }
+        if bytes.len() >= MAX_NUL_STRING {
+            return Err(DarError::Corrupt(format!(
+                "NUL-terminated string exceeds {MAX_NUL_STRING} bytes"
+            )));
+        }
         bytes.push(b);
     }
     String::from_utf8(bytes).map_err(|e| DarError::Corrupt(e.to_string()))
@@ -416,9 +458,16 @@ fn read_nul_string<R: Read>(r: &mut R) -> Result<String, DarError> {
 
 /// Skip a NUL-terminated string without collecting the bytes.
 fn skip_nul_string<R: Read>(r: &mut R) -> Result<(), DarError> {
+    let mut len: usize = 0;
     loop {
         if read_u8(r)? == 0 {
             return Ok(());
+        }
+        len += 1;
+        if len > MAX_NUL_STRING {
+            return Err(DarError::Corrupt(format!(
+                "NUL-terminated string exceeds {MAX_NUL_STRING} bytes"
+            )));
         }
     }
 }
@@ -426,9 +475,13 @@ fn skip_nul_string<R: Read>(r: &mut R) -> Result<(), DarError> {
 /// Seek past `n` bytes.
 fn skip<R: Seek>(r: &mut R, n: u64) -> Result<(), DarError> {
     if n > 0 {
-        r.seek(SeekFrom::Current(n as i64))
-            .map(|_| ())
-            .map_err(DarError::Io)?;
+        // `SeekFrom::Current` takes an i64; a value above i64::MAX would cast to
+        // a negative offset and seek *backwards* (re-reading earlier bytes on a
+        // File).  No real DAR field is that large — reject it outright.
+        let off = i64::try_from(n).map_err(|_| {
+            DarError::Corrupt(format!("skip length {n} exceeds seekable range"))
+        })?;
+        r.seek(SeekFrom::Current(off)).map_err(DarError::Io)?;
     }
     Ok(())
 }
