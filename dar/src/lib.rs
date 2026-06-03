@@ -27,8 +27,11 @@
 //!
 //! ## Key non-obvious invariants
 //!
-//! - **Infinint**: always 5 bytes — `0x80 XX XX XX XX`, value = last 4 as
-//!   big-endian u32.
+//! - **Infinint**: variable-length. The common form is 5 bytes
+//!   (`0x80 XX XX XX XX`, a big-endian u32); timestamps past 2^32 use the
+//!   9-byte `0x40` form (big-endian u64). Encodings wider than 64 bits are
+//!   rejected as corrupt — this reader decodes to `u64` or errors, never
+//!   truncates.
 //! - **Permissions**: 2-byte big-endian u16, *not* an infinint.
 //! - **Inode bit 4**: when set the inode is 41 bytes (includes nlink+field9)
 //!   and an FSA block follows; when clear the inode is 31 bytes, no FSA.

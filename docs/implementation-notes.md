@@ -11,8 +11,8 @@ authoritative source is the dar source tree.
 DAR magic is `00 00 00 7b` (big-endian u32 = 123 = `SAUV_MAGIC_NUMBER`), **not**
 an ASCII string.
 
-All variable-length integers use the **infinint** encoding: always exactly
-5 bytes, preamble `0x80` followed by a big-endian u32.
+Variable-length integers use the **infinint** encoding. The most common form
+is 5 bytes — preamble `0x80` followed by a big-endian u32:
 
 ```
 80 00 00 00 00  →  0
@@ -20,7 +20,11 @@ All variable-length integers use the **infinint** encoding: always exactly
 80 00 00 01 f5  →  501
 ```
 
-Anything other than `0x80` in the first byte is a format error.
+Larger values use a wider group (see §7). This reader targets `u64`, so it
+accepts only the 4-byte (`0x80`) and 8-byte (`0x40`) groups; a leading `0x00`
+skip-byte or a terminal below `0x40` denotes a >64-bit value and is rejected as
+corrupt rather than truncated. A first byte that is `0x00`, or has more than
+one bit set, is a format error.
 
 ---
 
@@ -209,6 +213,15 @@ terminal  skip  pos  data_bytes  typical use
 The `0x80` case coincides with the §1 description: terminal `0x80`,
 `data_bytes = 4`, value is a big-endian u32.
 
+**Reader contract (u64 or error).** `read_infinint` decodes to `u64`, which
+holds at most 8 data bytes. Only the `0x80` (4-byte) and `0x40` (8-byte) groups
+fit. Any leading `0x00` skip-byte (≥ 36 bytes) or a terminal below `0x40`
+(`pos > 1`, ≥ 12 bytes) denotes a value too large for `u64` and is rejected as
+`Corrupt` — never silently truncated. Rejecting the skip-byte form on the first
+byte also removes the leading-zero-run DoS and the `(skip × 8 …)` overflow that
+the general formula would otherwise allow. No real DAR field (size, offset,
+uid/gid, timestamp) exceeds 64 bits, so this loses no legitimate archive.
+
 **Empirically confirmed:** Passware Kit Mobile 2026 v3.0 produces DAR v9
 archives (`version_string = "090"`) where `ctime` seconds fields use the
 `0x40` terminal (8 data bytes) for timestamps with epoch values that exceed
@@ -258,4 +271,25 @@ verification.
 label scan; timestamps use `0x40` infinint encoding; `cmd_line` field = "N/A".
 
 Both archives share DAR magic `0x0000007b` and the same cat_sig encoding.
+
+---
+
+## 10. Hardening against malicious / corrupted input
+
+Every length and offset in a catalog is attacker-controlled. The reader treats
+a `.dar` as hostile and turns each malformed field into a graceful `Corrupt`
+error — never a panic, backward seek, or out-of-memory abort. The invariants:
+
+| Field / path | Risk if unchecked | Guard |
+|---|---|---|
+| infinint width | `(skip×8+pos+1)×4` overflow panic; >64-bit silent truncation | reject leading `0x00` and terminals `< 0x40` (§7) |
+| infinint zero-run | unbounded read / skip-count overflow | rejected on the first `0x00` byte |
+| `skip(n)` (TLV/FSA/CRC lengths) | `n > i64::MAX` casts negative → backward seek on a File | `i64::try_from(n)` → `Corrupt` |
+| `archive_origin + archive_offset` | u64 overflow panic | `checked_add` → `Corrupt` |
+| `stored_size` | `vec![0u8; huge]` allocation bomb / OOM abort | bounds-check against actual archive length **before** allocating |
+| NUL-terminated path/name | unbounded buffer growth on a NUL-free region | capped at `MAX_NUL_STRING` (64 KiB) |
+
+These are covered by dedicated red/green tests (`tests/synthetic.rs`,
+`src/lib.rs` unit tests) and a `cargo fuzz` target (`fuzz/fuzz_targets/fuzz_open.rs`)
+exercising `open` + `extract` over arbitrary bytes.
 ```
