@@ -4,8 +4,8 @@
 //! specific code path that real archive fixtures cannot reach.  No on-disk
 //! files are required.
 
-use std::io::Cursor;
 use dar::{DarError, DarReader};
+use std::io::Cursor;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -19,9 +19,9 @@ fn inode_base(bit4: bool) -> Vec<u8> {
     let mut v = vec![flags];
     v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // uid
     v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // gid
-    v.extend_from_slice(&[0x00, 0x00]);                    // perms
+    v.extend_from_slice(&[0x00, 0x00]); // perms
     for _ in 0..3 {
-        v.push(b's');                                       // timestamp type
+        v.push(b's'); // timestamp type
         v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // seconds
     }
     if bit4 {
@@ -35,17 +35,17 @@ fn inode_base(bit4: bool) -> Vec<u8> {
 /// After this, `archive_origin` == 21.
 fn header() -> Vec<u8> {
     let mut v = vec![0x00u8, 0x00, 0x00, 0x7b]; // magic
-    v.extend_from_slice(&[0u8; 10]);              // internal_name
-    v.extend_from_slice(&[0x00, 0x00]);           // flag + ext_char
-    v.extend_from_slice(&inf(0));                 // TLV count = 0
+    v.extend_from_slice(&[0u8; 10]); // internal_name
+    v.extend_from_slice(&[0x00, 0x00]); // flag + ext_char
+    v.extend_from_slice(&inf(0)); // TLV count = 0
     v
 }
 
 /// Catalog escape + 10-byte label + NUL path.
 fn catalog_open() -> Vec<u8> {
     let mut v = vec![0xAD, 0xFD, 0xEA, 0x77, 0x21, 0x43]; // seqt_catalogue
-    v.extend_from_slice(&[0u8; 10]);                        // label
-    v.push(0x00);                                           // path NUL
+    v.extend_from_slice(&[0u8; 10]); // label
+    v.push(0x00); // path NUL
     v
 }
 
@@ -76,9 +76,9 @@ fn inode_ns(bit4: bool) -> Vec<u8> {
     let mut v = vec![flags];
     v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // uid
     v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // gid
-    v.extend_from_slice(&[0x00, 0x00]);                    // perms
+    v.extend_from_slice(&[0x00, 0x00]); // perms
     for _ in 0..3 {
-        v.push(b'n');                                       // type 'n'
+        v.push(b'n'); // type 'n'
         v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // seconds
         v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // nanoseconds
     }
@@ -110,9 +110,9 @@ fn file_entry(name: &str, enc: u8, comp: u8, archive_offset: u32, size: u32) -> 
     v.extend_from_slice(name.as_bytes());
     v.push(0x00);
     v.extend(inode_base(false));
-    v.extend_from_slice(&inf(size));           // logical size
+    v.extend_from_slice(&inf(size)); // logical size
     v.extend_from_slice(&inf(archive_offset)); // archive_offset
-    v.extend_from_slice(&inf(size));           // stored_size
+    v.extend_from_slice(&inf(size)); // stored_size
     v.push(enc);
     v.push(comp);
     v.extend_from_slice(&inf(0)); // crc_size = 0
@@ -145,14 +145,13 @@ fn minimal_dar(files: Vec<Vec<u8>>) -> Vec<u8> {
 #[test]
 fn corrupt_infinint_in_header_preserves_cause() {
     let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b]; // magic
-    buf.extend_from_slice(&[0u8; 10]);              // label
-    buf.extend_from_slice(&[0x00, 0x00]);           // flag + ext_char
-    buf.push(0x03);                                 // invalid terminal — two bits set
+    buf.extend_from_slice(&[0u8; 10]); // label
+    buf.extend_from_slice(&[0x00, 0x00]); // flag + ext_char
+    buf.push(0x03); // invalid terminal — two bits set
     buf.extend_from_slice(&[0x00u8; 4]);
 
-    let err = match DarReader::open(Cursor::new(buf)) {
-        Err(e) => e,
-        Ok(_) => panic!("expected Err, got Ok"),
+    let Err(err) = DarReader::open(Cursor::new(buf)) else {
+        panic!("expected Err, got Ok");
     };
     assert!(
         matches!(&err, DarError::Corrupt(s) if s.contains("terminal") || s.contains("infinint")),
@@ -248,7 +247,7 @@ fn catalog_unknown_entry_type_stops_parsing() {
     buf.extend(root_dir());
     buf.extend(file_entry("before.txt", 0, b'n', 0, 0));
     buf.push(0x01); // cat_sig → 'a' (0x61), unknown type
-    buf.push(EOD);  // never reached
+    buf.push(EOD); // never reached
     let r = DarReader::open(Cursor::new(buf)).expect("open");
     let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
     assert_eq!(paths, ["before.txt"]);
@@ -291,9 +290,9 @@ fn catalog_without_escape_lists_entries() {
     const LABEL: [u8; 10] = [0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A];
 
     let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b]; // magic
-    buf.extend_from_slice(&LABEL);                  // internal_name
-    buf.extend_from_slice(&[0x00, 0x00]);            // flag + ext_char
-    buf.extend_from_slice(&inf(0));                  // TLV count = 0 → archive_origin = 21
+    buf.extend_from_slice(&LABEL); // internal_name
+    buf.extend_from_slice(&[0x00, 0x00]); // flag + ext_char
+    buf.extend_from_slice(&inf(0)); // TLV count = 0 → archive_origin = 21
 
     // File data — use non-zero bytes so the label won't false-match in the body.
     buf.extend_from_slice(b"FFFFFFFFFFFFFFFF"); // 16 distinct bytes
@@ -409,7 +408,7 @@ fn symlink_entry(name: &str, target: &str) -> Vec<u8> {
 /// catalog header.  Format 11 uses an empty NUL-terminated path `"\0"`.
 fn catalog_open_no_path() -> Vec<u8> {
     let mut v = vec![0xAD, 0xFD, 0xEA, 0x77, 0x21, 0x43]; // seqt_catalogue
-    v.extend_from_slice(&[0u8; 10]);                        // label (no path NUL follows)
+    v.extend_from_slice(&[0u8; 10]); // label (no path NUL follows)
     v
 }
 
@@ -440,13 +439,13 @@ fn inode_large_ctime_ts() -> Vec<u8> {
     let mut v = vec![0x00u8]; // flags (bit4=0)
     v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // uid = 0
     v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // gid = 0
-    v.extend_from_slice(&[0x00, 0x00]);                    // perms = 0
-    // ctime: 'n' type, seconds via 0x40 (8 bytes), nanoseconds via 0x80 (4 bytes)
+    v.extend_from_slice(&[0x00, 0x00]); // perms = 0
+                                        // ctime: 'n' type, seconds via 0x40 (8 bytes), nanoseconds via 0x80 (4 bytes)
     v.push(b'n');
     v.push(0x40);
     v.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x5d, 0x15, 0x93, 0x31]); // seconds
-    v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]);                    // nanoseconds
-    // mtime: 's' type, seconds via 0x80
+    v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // nanoseconds
+                                                          // mtime: 's' type, seconds via 0x80
     v.push(b's');
     v.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]);
     // atime: 's' type
@@ -463,8 +462,8 @@ fn file_entry_large_ts(name: &str) -> Vec<u8> {
     v.extend_from_slice(&inf(0)); // data_size
     v.extend_from_slice(&inf(0)); // archive_offset
     v.extend_from_slice(&inf(0)); // stored_size
-    v.push(0x00);                 // enc = none
-    v.push(b'n');                 // comp = none
+    v.push(0x00); // enc = none
+    v.push(b'n'); // comp = none
     v.extend_from_slice(&inf(0)); // crc_size = 0
     v
 }

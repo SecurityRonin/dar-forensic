@@ -20,19 +20,19 @@
 //!   /path/to/dar253/bin/dar -c /tmp/v9_archive -R /tmp/v9_corpus -g files/hello.txt
 //!   cp /tmp/v9_archive.1.dar v9_hello.dar
 //!
-//! dar 2.5.3 source: https://sourceforge.net/projects/dar/files/dar/2.5.3/
+//! dar 2.5.3 source: <https://sourceforge.net/projects/dar/files/dar/2.5.3/>
 //! Contents: files/hello.txt — 15 bytes: "hello format 9\n"
 
+use dar::DarReader;
 use std::io::Cursor;
 use std::path::Path;
-use dar::DarReader;
 
 const DATA_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
 
 fn open_v11() -> DarReader<Cursor<Vec<u8>>> {
     let path = format!("{DATA_DIR}/v11_hello.dar");
-    let data = std::fs::read(Path::new(&path))
-        .unwrap_or_else(|e| panic!("read v11_hello.dar: {e}"));
+    let data =
+        std::fs::read(Path::new(&path)).unwrap_or_else(|e| panic!("read v11_hello.dar: {e}"));
     DarReader::open(Cursor::new(data))
         .unwrap_or_else(|e| panic!("DarReader::open v11_hello.dar: {e}"))
 }
@@ -70,7 +70,9 @@ fn v11_entry_size_is_13() {
 #[test]
 fn v11_extracts_hello_txt() {
     let mut r = open_v11();
-    let data = r.extract("files/hello.txt").expect("extract files/hello.txt");
+    let data = r
+        .extract("files/hello.txt")
+        .expect("extract files/hello.txt");
     assert_eq!(data, b"hello corpus\n");
 }
 
@@ -78,8 +80,7 @@ fn v11_extracts_hello_txt() {
 
 fn open_v9() -> DarReader<Cursor<Vec<u8>>> {
     let path = format!("{DATA_DIR}/v9_hello.dar");
-    let data = std::fs::read(Path::new(&path))
-        .unwrap_or_else(|e| panic!("read v9_hello.dar: {e}"));
+    let data = std::fs::read(Path::new(&path)).unwrap_or_else(|e| panic!("read v9_hello.dar: {e}"));
     DarReader::open(Cursor::new(data))
         .unwrap_or_else(|e| panic!("DarReader::open v9_hello.dar: {e}"))
 }
@@ -129,7 +130,9 @@ fn open_truncated_returns_err() {
 #[test]
 fn open_wrong_magic_returns_err() {
     // Old SecurityRonin format magic — must be rejected
-    let result = DarReader::open(Cursor::new(b"DAR\x00\x01\x00\x00\x00\x00\x00\x00\x00".to_vec()));
+    let result = DarReader::open(Cursor::new(
+        b"DAR\x00\x01\x00\x00\x00\x00\x00\x00\x00".to_vec(),
+    ));
     assert!(result.is_err(), "wrong magic must return Err");
 }
 

@@ -91,14 +91,16 @@ impl<R: Read + Seek> DarReader<R> {
     /// Open a DAR archive, validating the magic and loading the catalog.
     pub fn open(mut reader: R) -> Result<Self, DarError> {
         let mut magic = [0u8; 4];
-        reader.read_exact(&mut magic).map_err(|_| DarError::NotADar)?;
+        reader
+            .read_exact(&mut magic)
+            .map_err(|_| DarError::NotADar)?;
         if magic != DAR_MAGIC {
             return Err(DarError::NotADar);
         }
 
         let mut label = [0u8; 10];
         reader.read_exact(&mut label)?; // internal_name label
-        skip(&mut reader, 2)?;  // flag + ext_char
+        skip(&mut reader, 2)?; // flag + ext_char
 
         // TLV list: infinint(count) then count × (u16 type + infinint len + data)
         let tlv_count = read_infinint(&mut reader).map_err(|e| match e {
@@ -122,7 +124,7 @@ impl<R: Read + Seek> DarReader<R> {
         let format_version: u32 = {
             let b = version_str.as_bytes();
             if b.len() >= 2 {
-                (b[0].saturating_sub(48) as u32) * 256 + (b[1].saturating_sub(48) as u32)
+                u32::from(b[0].saturating_sub(48)) * 256 + u32::from(b[1].saturating_sub(48))
             } else {
                 u32::MAX // unrecognised — assume modern format (has path field)
             }
@@ -134,8 +136,8 @@ impl<R: Read + Seek> DarReader<R> {
         let via_escape = find_catalogue(&mut reader, &label)?;
         if via_escape {
             skip(&mut reader, 10)?; // catalog label
-            // Format 9 and earlier have no working-directory path field.
-            // Format 10+ include a NUL-terminated path (possibly non-empty).
+                                    // Format 9 and earlier have no working-directory path field.
+                                    // Format 10+ include a NUL-terminated path (possibly non-empty).
             if format_version >= 10 {
                 skip_nul_string(&mut reader)?;
             }
@@ -143,14 +145,21 @@ impl<R: Read + Seek> DarReader<R> {
 
         let entries = parse_catalog(&mut reader)?;
 
-        Ok(Self { inner: reader, archive_origin, entries })
+        Ok(Self {
+            inner: reader,
+            archive_origin,
+            entries,
+        })
     }
 
     /// List all archived file entries (path and uncompressed size).
     pub fn entries(&self) -> Vec<DarEntry> {
         self.entries
             .iter()
-            .map(|e| DarEntry { path: e.path.clone(), size: e.size })
+            .map(|e| DarEntry {
+                path: e.path.clone(),
+                size: e.size,
+            })
             .collect()
     }
 
@@ -164,7 +173,7 @@ impl<R: Read + Seek> DarReader<R> {
             .clone();
 
         if entry.encrypted {
-            return Err(DarError::Corrupt(format!("'{}' is encrypted", path)));
+            return Err(DarError::Corrupt(format!("'{path}' is encrypted")));
         }
         if entry.compression != b'n' {
             return Err(DarError::Corrupt(format!(
@@ -206,6 +215,11 @@ impl<R: Read + Seek> DarReader<R> {
 
 // ── Catalog parser ────────────────────────────────────────────────────────────
 
+/// On archives larger than this, the catalog scan starts this many bytes
+/// before EOF (the catalog always lives at the tail), avoiding a full read of
+/// a multi-gigabyte forensic archive before falling back to a full scan.
+const TAIL_SCAN: u64 = 256 * 1024 * 1024;
+
 const CHUNK: usize = 4 * 1024 * 1024;
 // OVERLAP = max(SEQT_CATALOGUE.len(), label.len()) - 1; carries bytes across chunk boundaries.
 const OVERLAP: usize = 9;
@@ -234,12 +248,20 @@ fn scan_window<R: Read + Seek>(
         // buf[overlap_len..total] → newly read bytes
         let buf_base = chunk_file_pos - overlap_len as u64;
 
-        if let Some(i) = buf[..total].windows(SEQT_CATALOGUE.len()).position(|w| w == SEQT_CATALOGUE) {
-            r.seek(SeekFrom::Start(buf_base + i as u64 + SEQT_CATALOGUE.len() as u64))?;
+        if let Some(i) = buf[..total]
+            .windows(SEQT_CATALOGUE.len())
+            .position(|w| w == SEQT_CATALOGUE)
+        {
+            r.seek(SeekFrom::Start(
+                buf_base + i as u64 + SEQT_CATALOGUE.len() as u64,
+            ))?;
             return Ok(Some(true));
         }
         if use_label {
-            if let Some(i) = buf[..total].windows(label.len()).position(|w| w == label.as_ref()) {
+            if let Some(i) = buf[..total]
+                .windows(label.len())
+                .position(|w| w == label.as_ref())
+            {
                 r.seek(SeekFrom::Start(buf_base + i as u64 + label.len() as u64))?;
                 return Ok(Some(false));
             }
@@ -278,9 +300,8 @@ fn find_catalogue<R: Read + Seek>(r: &mut R, label: &[u8; 10]) -> Result<bool, D
         return Err(DarError::Corrupt("archive body too short".into()));
     }
 
-    // Jump to at most TAIL bytes before end; for small files this equals archive_origin.
-    const TAIL: u64 = 256 * 1024 * 1024;
-    let tail_start = archive_origin.max(file_end.saturating_sub(TAIL));
+    // Jump to at most TAIL_SCAN bytes before end; for small files this equals archive_origin.
+    let tail_start = archive_origin.max(file_end.saturating_sub(TAIL_SCAN));
     r.seek(SeekFrom::Start(tail_start))?;
 
     if let Some(result) = scan_window(r, label, use_label)? {
@@ -478,9 +499,8 @@ fn skip<R: Seek>(r: &mut R, n: u64) -> Result<(), DarError> {
         // `SeekFrom::Current` takes an i64; a value above i64::MAX would cast to
         // a negative offset and seek *backwards* (re-reading earlier bytes on a
         // File).  No real DAR field is that large — reject it outright.
-        let off = i64::try_from(n).map_err(|_| {
-            DarError::Corrupt(format!("skip length {n} exceeds seekable range"))
-        })?;
+        let off = i64::try_from(n)
+            .map_err(|_| DarError::Corrupt(format!("skip length {n} exceeds seekable range")))?;
         r.seek(SeekFrom::Current(off)).map_err(DarError::Io)?;
     }
     Ok(())
@@ -509,7 +529,7 @@ fn read_inode_base<R: Read + Seek>(r: &mut R) -> Result<u8, DarError> {
     let flags = read_u8(r)?;
     read_infinint(r)?; // uid
     read_infinint(r)?; // gid
-    skip(r, 2)?;       // perms (always a 2-byte big-endian u16, never an infinint)
+    skip(r, 2)?; // perms (always a 2-byte big-endian u16, never an infinint)
     skip_timestamp(r)?; // ctime
     skip_timestamp(r)?; // mtime
     skip_timestamp(r)?; // atime
@@ -565,7 +585,10 @@ mod tests {
         // Encodes the value 0x5d15_9331 in 8 big-endian bytes.
         let mut data = vec![0x40u8];
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x5d, 0x15, 0x93, 0x31]);
-        assert_eq!(read_infinint(&mut Cursor::new(data)).unwrap(), 0x5d15_9331u64);
+        assert_eq!(
+            read_infinint(&mut Cursor::new(data)).unwrap(),
+            0x5d15_9331u64
+        );
     }
 
     #[test]
@@ -594,7 +617,10 @@ mod tests {
     #[test]
     fn nul_string_reads_until_nul() {
         let data = b"hello\x00world";
-        assert_eq!(read_nul_string(&mut Cursor::new(&data[..])).unwrap(), "hello");
+        assert_eq!(
+            read_nul_string(&mut Cursor::new(&data[..])).unwrap(),
+            "hello"
+        );
     }
 
     #[test]
@@ -633,15 +659,16 @@ mod tests {
     fn find_catalogue_body_too_short() {
         // Fewer than 6 bytes — can't fill the initial window; label also too short.
         let label = [0u8; 10];
-        let err = find_catalogue(&mut Cursor::new(&[0x01u8, 0x02, 0x03][..]), &label)
-            .unwrap_err();
-        assert!(matches!(&err, DarError::Corrupt(s) if s == "archive body too short"
-            || s == "seqt_catalogue not found"));
+        let err = find_catalogue(&mut Cursor::new(&[0x01u8, 0x02, 0x03][..]), &label).unwrap_err();
+        assert!(
+            matches!(&err, DarError::Corrupt(s) if s == "archive body too short"
+            || s == "seqt_catalogue not found")
+        );
     }
 
     #[test]
     fn find_catalogue_escape_at_start() {
-        let mut data = vec![0xAD, 0xFD, 0xEA, 0x77, 0x21, 0x43, 0xFF];
+        let mut data = [0xAD, 0xFD, 0xEA, 0x77, 0x21, 0x43, 0xFF];
         let mut c = Cursor::new(&mut data[..]);
         let via_escape = find_catalogue(&mut c, &[0u8; 10]).unwrap();
         assert!(via_escape);
@@ -692,9 +719,9 @@ mod tests {
         let mut data = vec![0x00u8]; // flags (bit4=0)
         data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // uid
         data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // gid
-        data.extend_from_slice(&[0x00, 0x00]);                    // perms
+        data.extend_from_slice(&[0x00, 0x00]); // perms
         for _ in 0..3 {
-            data.push(b's');                                       // timestamp type
+            data.push(b's'); // timestamp type
             data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // seconds
         }
         data.push(0xFF); // sentinel — must not be consumed
@@ -709,7 +736,7 @@ mod tests {
         let mut data = vec![0x10u8]; // flags (bit4=1)
         data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // uid
         data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // gid
-        data.extend_from_slice(&[0x00, 0x00]);                    // perms
+        data.extend_from_slice(&[0x00, 0x00]); // perms
         for _ in 0..3 {
             data.push(b's');
             data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]);
@@ -730,8 +757,8 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x05]); // tag
         data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x03]); // size=3
-        data.extend_from_slice(&[0xAA, 0xBB, 0xCC]);               // data
-        data.push(0xFF);                                             // sentinel
+        data.extend_from_slice(&[0xAA, 0xBB, 0xCC]); // data
+        data.push(0xFF); // sentinel
         let mut c = Cursor::new(data);
         skip_fsa(&mut c).unwrap();
         assert_eq!(c.position(), 13); // 5 + 5 + 3 = 13
@@ -800,6 +827,10 @@ mod tests {
         c.set_position(32);
         let err = skip(&mut c, 0x8000_0000_0000_0000).unwrap_err();
         assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
-        assert_eq!(c.position(), 32, "position must not move on a rejected skip");
+        assert_eq!(
+            c.position(),
+            32,
+            "position must not move on a rejected skip"
+        );
     }
 }
