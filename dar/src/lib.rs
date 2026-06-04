@@ -1,7 +1,7 @@
 //! Pure-Rust reader for Denis Corbin DAR (Disk ARchiver) archives.
 //!
-//! Supports DAR format versions 8, 9, and 11 (produced by dar 2.x).
-//! Passware Mobile produces v8/v9 archives; dar 2.8.5 produces v11.
+//! Supports DAR format versions 8 through 11 (produced by dar 2.4–2.8).
+//! Passware Kit Mobile produces format-9 archives; dar 2.8.5 produces 11.3.
 //!
 //! ## Format sketch
 //!
@@ -17,7 +17,7 @@
 //!   escaped sequences (seqt_file, seqt_saved, …) + raw file bytes
 //!
 //! Catalog  (located by seqt_catalogue escape: AD FD EA 77 21 43):
-//!   [10] label  +  NUL-terminated path  +  entries
+//!   [10] label  +  (NUL working-dir path, format 11.1+ only)  +  entries
 //!
 //!   Each entry: cat_sig byte where (cat_sig & 0x1f | 0x60) gives type
 //!     'd' directory  → NUL-name + inode [+ FSA]  (push to dir stack)
@@ -33,8 +33,10 @@
 //!   rejected as corrupt — this reader decodes to `u64` or errors, never
 //!   truncates.
 //! - **Permissions**: 2-byte big-endian u16, *not* an infinint.
-//! - **Inode bit 4**: when set the inode is 41 bytes (includes nlink+field9)
-//!   and an FSA block follows; when clear the inode is 31 bytes, no FSA.
+//! - **Timestamps**: format 8 stores a bare seconds infinint; format 9+ prefix
+//!   a unit byte (`'s'`/`'u'`/`'n'`) and add a sub-second infinint for `'u'`/`'n'`.
+//! - **FSA** (format 9+ only): inode flag bit `0x10` (FSA-full) adds inode
+//!   infinints and an FSA block; format 8 has no FSA.
 //! - **archive_offset**: points *directly* to the raw file bytes, not to the
 //!   data-section header that precedes them in the body stream.
 //!   `seek(archive_origin + archive_offset)` then `read(stored_size)`.
@@ -145,15 +147,17 @@ impl<R: Read + Seek> DarReader<R> {
         let via_escape = find_catalogue(&mut reader, &label)?;
         if via_escape {
             skip(&mut reader, 10)?; // catalog label
-            // The working-directory ("in_place") path exists only from format 11.1
-            // (libdar catalogue.cpp:157, gate `>= archive_version(11,1)`).  Formats 8,
-            // 9, 10 and 11.0 have none — skipping one there eats the first entry.
+                                    // The working-directory ("in_place") path exists only from format 11.1
+                                    // (libdar catalogue.cpp:157, gate `>= archive_version(11,1)`).  Formats 8,
+                                    // 9, 10 and 11.0 have none — skipping one there eats the first entry.
             if format_value >= FORMAT_11_1 {
                 skip_nul_string(&mut reader)?;
             }
         }
 
-        let entries = parse_catalog(&mut reader)?;
+        // major edition = value() >> 8 (value = major*256 + fix). Drives the
+        // version-dependent inode/timestamp layout in parse_catalog.
+        let entries = parse_catalog(&mut reader, format_value >> 8)?;
 
         Ok(Self {
             inner: reader,
@@ -333,7 +337,7 @@ fn find_catalogue<R: Read + Seek>(r: &mut R, label: &[u8; 10]) -> Result<bool, D
 ///
 /// Stops when the root directory is closed (depth reaches zero) or an unknown
 /// entry type is encountered (slice trailer).
-fn parse_catalog<R: Read + Seek>(r: &mut R) -> Result<Vec<EntryRef>, DarError> {
+fn parse_catalog<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<Vec<EntryRef>, DarError> {
     let mut entries = Vec::new();
     let mut dir_stack: Vec<String> = Vec::new();
     let mut depth: u32 = 0;
@@ -359,8 +363,8 @@ fn parse_catalog<R: Read + Seek>(r: &mut R) -> Result<Vec<EntryRef>, DarError> {
             }
             'd' => {
                 let name = read_nul_string(r)?;
-                let flags = read_inode_base(r)?;
-                if (flags >> 4) & 1 != 0 {
+                let flags = read_inode_base(r, format_major)?;
+                if format_major >= 9 && (flags >> 4) & 1 != 0 {
                     skip_fsa(r)?;
                 }
                 depth += 1;
@@ -371,8 +375,8 @@ fn parse_catalog<R: Read + Seek>(r: &mut R) -> Result<Vec<EntryRef>, DarError> {
             }
             'f' => {
                 let name = read_nul_string(r)?;
-                let flags = read_inode_base(r)?;
-                if (flags >> 4) & 1 != 0 {
+                let flags = read_inode_base(r, format_major)?;
+                if format_major >= 9 && (flags >> 4) & 1 != 0 {
                     skip_fsa(r)?;
                 }
 
@@ -402,8 +406,8 @@ fn parse_catalog<R: Read + Seek>(r: &mut R) -> Result<Vec<EntryRef>, DarError> {
             'l' => {
                 // Symbolic link: inode + NUL-terminated target path; not extractable.
                 let _name = read_nul_string(r)?;
-                let flags = read_inode_base(r)?;
-                if (flags >> 4) & 1 != 0 {
+                let flags = read_inode_base(r, format_major)?;
+                if format_major >= 9 && (flags >> 4) & 1 != 0 {
                     skip_fsa(r)?;
                 }
                 skip_nul_string(r)?; // symlink target
@@ -521,10 +525,17 @@ fn skip<R: Seek>(r: &mut R, n: u64) -> Result<(), DarError> {
 /// Timestamps are prefixed with a type byte:
 /// - `'s'` (0x73) and others: seconds only — one infinint follows
 /// - `'n'` (0x6e): nanosecond precision — two infinints follow (seconds + nanoseconds)
-fn skip_timestamp<R: Read + Seek>(r: &mut R) -> Result<(), DarError> {
+fn skip_timestamp<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<(), DarError> {
+    // Format 8 and earlier store a bare seconds infinint with NO precision byte
+    // (libdar datetime.cpp:372). Format 9+ prefix a unit byte ('s' seconds,
+    // 'u' microsecond, 'n' nanosecond); sub-second units add a second infinint.
+    if format_major < 9 {
+        read_infinint(r)?;
+        return Ok(());
+    }
     let ts_type = read_u8(r)?;
     read_infinint(r)?;
-    if ts_type == b'n' {
+    if ts_type == b'n' || ts_type == b'u' {
         read_infinint(r)?;
     }
     Ok(())
@@ -532,20 +543,22 @@ fn skip_timestamp<R: Read + Seek>(r: &mut R) -> Result<(), DarError> {
 
 /// Read the inode flags byte and seek past the remaining inode fields.
 ///
-/// Base layout: flags(1) + uid(inf) + gid(inf) + perms(2) + ctime + mtime + atime
-///   Each timestamp: type_byte(1) + seconds(inf) [+ nanoseconds(inf) if type=='n']
-///   Optional: nlink(inf) + field9(inf) when (flags >> 4) & 1 == 1
-fn read_inode_base<R: Read + Seek>(r: &mut R) -> Result<u8, DarError> {
+/// Base layout: flags(1) + uid(inf) + gid(inf) + perms(2) + 3 timestamps
+///   Each timestamp: see [`skip_timestamp`] (version-dependent).
+///   FSA inode fields (format 9+ only): two infinints when (flags >> 4) & 1 == 1.
+fn read_inode_base<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<u8, DarError> {
     let flags = read_u8(r)?;
     read_infinint(r)?; // uid
     read_infinint(r)?; // gid
     skip(r, 2)?; // perms (always a 2-byte big-endian u16, never an infinint)
-    skip_timestamp(r)?; // ctime
-    skip_timestamp(r)?; // mtime
-    skip_timestamp(r)?; // atime
-    if (flags >> 4) & 1 != 0 {
-        read_infinint(r)?; // nlink
-        read_infinint(r)?; // field9
+    skip_timestamp(r, format_major)?;
+    skip_timestamp(r, format_major)?;
+    skip_timestamp(r, format_major)?;
+    // FSA inode fields exist only from format 9 (libdar cat_inode.cpp:264); bit
+    // 0x10 is the FSA-full status. Format 8 has no FSA, so never read these there.
+    if format_major >= 9 && (flags >> 4) & 1 != 0 {
+        read_infinint(r)?;
+        read_infinint(r)?;
     }
     Ok(flags)
 }
@@ -736,7 +749,7 @@ mod tests {
         }
         data.push(0xFF); // sentinel — must not be consumed
         let mut c = Cursor::new(data);
-        assert_eq!(read_inode_base(&mut c).unwrap(), 0x00);
+        assert_eq!(read_inode_base(&mut c, 11).unwrap(), 0x00);
         assert_eq!(c.position(), 31);
     }
 
@@ -755,7 +768,7 @@ mod tests {
         data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // field9
         data.push(0xFF); // sentinel
         let mut c = Cursor::new(data);
-        assert_eq!(read_inode_base(&mut c).unwrap(), 0x10);
+        assert_eq!(read_inode_base(&mut c, 11).unwrap(), 0x10);
         assert_eq!(c.position(), 41);
     }
 
