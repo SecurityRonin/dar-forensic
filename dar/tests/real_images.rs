@@ -128,7 +128,8 @@ fn v9_extracts_hello_txt() {
 fn open_v8() -> DarReader<Cursor<Vec<u8>>> {
     let path = format!("{DATA_DIR}/v8_hello.dar");
     let data = std::fs::read(Path::new(&path)).unwrap_or_else(|e| panic!("read v8_hello.dar: {e}"));
-    DarReader::open(Cursor::new(data)).unwrap_or_else(|e| panic!("DarReader::open v8_hello.dar: {e}"))
+    DarReader::open(Cursor::new(data))
+        .unwrap_or_else(|e| panic!("DarReader::open v8_hello.dar: {e}"))
 }
 
 #[test]
@@ -157,6 +158,55 @@ fn v8_extracts_hello_txt() {
     let path = r.entries()[0].path.clone(); // virtual-root prefix is data-determined
     let data = r.extract(&path).expect("extract");
     assert_eq!(data, b"hello format 8\n");
+}
+
+// ── v10_hello.dar (DAR format 10.1, version_string "0:1") ────────────────────
+//
+// Created with dar 2.6.16 (built from the SourceForge release tarball,
+// --disable-nodump-flag).  Validates that the format >= 11.1 path-boundary fix
+// correctly treats format 10 as having NO catalog in-place path, and that the
+// format-9 inode/timestamp layout applies unchanged at format 10.
+//
+//   printf 'hello format 10\n' > /tmp/v10_corpus/files/hello.txt
+//   /path/to/dar-2.6.16/dar -Q -c /tmp/v10_archive -R /tmp/v10_corpus -g files/hello.txt
+//   cp /tmp/v10_archive.1.dar v10_hello.dar
+//
+// dar 2.6.16 source: <https://sourceforge.net/projects/dar/files/dar/2.6.16/>
+
+fn open_v10() -> DarReader<Cursor<Vec<u8>>> {
+    let path = format!("{DATA_DIR}/v10_hello.dar");
+    let data =
+        std::fs::read(Path::new(&path)).unwrap_or_else(|e| panic!("read v10_hello.dar: {e}"));
+    DarReader::open(Cursor::new(data))
+        .unwrap_or_else(|e| panic!("DarReader::open v10_hello.dar: {e}"))
+}
+
+#[test]
+fn v10_opens() {
+    let _ = open_v10();
+}
+
+#[test]
+fn v10_lists_one_entry() {
+    assert_eq!(open_v10().entries().len(), 1);
+}
+
+#[test]
+fn v10_entry_path_ends_with_hello_txt() {
+    assert!(open_v10().entries()[0].path.ends_with("files/hello.txt"));
+}
+
+#[test]
+fn v10_entry_size_is_16() {
+    assert_eq!(open_v10().entries()[0].size, 16);
+}
+
+#[test]
+fn v10_extracts_hello_txt() {
+    let mut r = open_v10();
+    let path = r.entries()[0].path.clone();
+    let data = r.extract(&path).expect("extract");
+    assert_eq!(data, b"hello format 10\n");
 }
 
 // ── error cases ───────────────────────────────────────────────────────────────
