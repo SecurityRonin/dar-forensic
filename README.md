@@ -56,13 +56,14 @@ println!("{}", String::from_utf8_lossy(&data));
 
 | DAR format | `version_string` | Status |
 |------------|------------------|--------|
-| Format 11 (dar 2.6–2.8) | e.g. `"0;3"` (11.3) | Supported — validated against a public fixture |
-| Format 9 (dar 2.5) | `"090"` | Supported — validated against a public fixture and a real Passware archive |
+| Format 8 (dar 2.4) | `"081"` | Supported — validated against a dar 2.4.24 fixture |
+| Format 9 (dar 2.5) | `"090"` | Supported — validated against a dar 2.5.3 fixture and a real Passware archive |
+| Format 10 (dar 2.6) | `"0:1"` | Supported — validated against a dar 2.6.16 fixture |
+| Format 11 (dar 2.7–2.8) | e.g. `"0;3"` (11.3) | Supported — validated against a dar 2.8.5 fixture |
 | Passware Mobile variant | `"090"`, no `seqt_catalogue` escape | Supported — label-scan catalog location |
-| Format 8 (dar 2.4) | `"080"` | Likely compatible (same catalog shape as 9), not yet validated |
 | Archive creation / writing | — | Not supported (reader only) |
 
-The DAR format version is encoded in the header `version_string`, where each byte is `value + 48` (so `"090"` → format 9). See [docs/implementation-notes.md](docs/implementation-notes.md) for the byte-level format reference.
+The DAR format version is encoded in the header `version_string`, where each byte is `value + 48` (so `"090"` → format 9, `"0:1"` → format 10.1). Version-dependent layout (timestamps, FSA, the catalog path boundary at 11.1) is documented in [docs/implementation-notes.md](docs/implementation-notes.md) §11, reverse-documented from the authoritative libdar source.
 
 ## Archive format
 
@@ -70,8 +71,8 @@ DAR archives use magic `00 00 00 7b` (`SAUV_MAGIC_NUMBER`, big-endian u32 — **
 
 ## Testing
 
-- **61 tests** — 27 unit, 20 synthetic-archive integration, 14 real-fixture integration — plus a `cargo fuzz` target over `DarReader::open` + `extract`.
-- **Public fixtures committed to the repo:** `v9_hello.dar` (built with dar 2.5.3) and `v11_hello.dar` (built with dar 2.8.5), so the real-archive tests run in CI and are independently reproducible.
+- **72 tests** — unit, synthetic-archive integration, and real-fixture integration — plus a `cargo fuzz` target over `DarReader::open` + `extract`.
+- **Public fixtures committed to the repo, one per format** — `v8_hello.dar` (dar 2.4.24), `v9_hello.dar` (dar 2.5.3), `v10_hello.dar` (dar 2.6.16) and `v11_hello.dar` (dar 2.8.5) — so every supported format is exercised in CI and is independently reproducible.
 - **Real-world validation:** parsing was confirmed against a 92 GiB archive produced by Passware Kit Mobile 2026 v3.0 (DAR format 9, 637,698 entries). That archive is confidential and is **not** committed; only the public fixtures ship with the repo.
 - **Fuzzing:** the hardened parser survives ≈1.5 million libFuzzer executions per 45 s with zero crashes.
 
