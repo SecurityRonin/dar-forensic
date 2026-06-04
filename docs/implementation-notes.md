@@ -292,4 +292,67 @@ error — never a panic, backward seek, or out-of-memory abort. The invariants:
 These are covered by dedicated red/green tests (`tests/synthetic.rs`,
 `src/lib.rs` unit tests) and a `cargo fuzz` target (`fuzz/fuzz_targets/fuzz_open.rs`)
 exercising `open` + `extract` over arbitrary bytes.
+
+---
+
+## 11. Per-format-version layout (from the authoritative libdar source)
+
+Reverse-documented from libdar at tag `v2.8.5` (its reader handles every older
+format, so its `if (reading_ver >= …)` guards are the layout boundaries). File
+citations are `src/libdar/<file>:<line>`. This is an independent
+description of the on-disk format — no GPL code is reproduced.
+
+**Format version value.** `archive_version::value() = major*256 + fix`
+(`archive_version.hpp`), where `major = byte0*256 + byte1` and each header byte
+is de-obfuscated as `value = byte - 48` (`archive_version.cpp:55-139`). All
+version gates below compare against this `value()`.
+
+**infinint is version-independent** (`real_infinint.cpp:56-114`, `TG = 4`):
+`data_bytes = (skip*8 + pos) * 4`. No format changes it, so the u64-or-`Corrupt`
+reader (§7) is correct for every format.
+
+**Catalog working-directory ("in_place") path — gated on `>= 11.1`, NOT `>= 10`.**
+After the `seqt_catalogue` escape and 10-byte catalog label, a NUL-terminated
+path is present only when `reading_ver >= archive_version(11,1)`
+(`catalogue.cpp:157`; sequential: `seqt_in_place` mark, `escape_catalogue.cpp:116`).
+Formats 8, 9, 10 and **11.0** have no path. (Earlier this reader used `>= 10`,
+which would mis-parse the first entry of a format-10 or 11.0 archive.)
+
+**Inode** (`cat_inode.cpp:121-330`), field order for formats ≥ 8:
+`flag(1) · uid(inf) · gid(inf) · perm(u16) · atime · mtime · ctime`, then
+EA fields if EA-status (`flag & 0x07`) is "full", then FSA fields if
+`reading_ver >= 9` and FSA-status (`flag & 0x18`) is set. There is **no
+nlink/field9** — hardlinks are separate `cat_mirage`/`cat_etoile` (`'m'`)
+entries. `flag & 0x18` is the FSA-status field (`0x10` = full), not a
+nlink-present bit.
+
+**Timestamps** (`datetime.cpp:368-387`):
+- format **< 9**: a bare seconds infinint (no type byte).
+- format **>= 9**: `type_byte('s'|'u'|'n') · seconds(inf) [· sub-second(inf) if 'u'/'n']`.
+
+**FSA** introduced at format **9** (`cat_inode.cpp:264`). In the inode only
+`fsa_families(inf)` + `fsa_size(inf)` (+ `fsa_offset(inf)` + `fsa_crc` on a
+sealed read) appear; the payload lives at `fsa_offset`. Absent in format 8.
+
+**cat_file** (`cat_file.cpp:108-321`) for a saved file: `size(inf) ·
+offset(inf) · storage_size(inf) · file_data_status(1) · compression(1) ·
+data_crc`. Since format **10**, a `file_data_status` byte is present even for
+**not-saved** files (`cat_file.cpp:222`). CRCs are length-prefixed infinints
+since format 8 (`crc.cpp:460`). For `compression == none` the `storage_size`
+bytes at `archive_origin + offset` are the raw file content.
+
+**Header (`header_version.cpp:87-444`):** for an unencrypted archive a reader
+sees `edition · algo_zip(1) · cmd_line(NUL) · flags(var)` then optional
+flag-gated blocks; the crypto-algo byte under `FLAG_SCRAMBLED` exists only for
+`edition >= 9` (`header_version.cpp:221`), and the format-10 KDF block
+(salt/iteration/hash) is gated on `FLAG_HAS_KDF_PARAM`, not the edition — so it
+is invisible when reading unencrypted archives.
+
+### What a format-8 / format-10 reader must do differently
+
+- **Format 8:** timestamps are bare seconds infinints (no type byte); no FSA;
+  no crypto byte under SCRAMBLED; no not-saved `file_data_status` byte.
+- **Format 10:** like 9 for extraction (tagged timestamps, FSA present), plus a
+  not-saved `file_data_status` byte; **still no catalog in_place path** (that
+  starts at 11.1).
 ```
