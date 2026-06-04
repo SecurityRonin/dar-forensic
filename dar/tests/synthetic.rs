@@ -428,6 +428,24 @@ fn catalog_without_nul_path_lists_entries() {
     assert_eq!(r.entries()[0].path, "f9.txt");
 }
 
+/// Format 10 (and 11.0) also have NO in-place path in the catalog header — per
+/// libdar that field begins only at archive format 11.1 (`catalogue.cpp:157`,
+/// gate `>= archive_version(11,1)`).  A reader that skips a path for any
+/// `format >= 10` consumes the first entry's bytes and mis-parses.
+#[test]
+fn catalog_format_10_has_no_inplace_path() {
+    let mut buf = header();
+    // Format-10 version string: ':' = 58 = 10 + 48 → major 10, fix 0.
+    buf.extend_from_slice(b"0:0\x00");
+    buf.extend(catalog_open_no_path());
+    buf.extend(root_dir());
+    buf.extend(file_entry("f10.txt", 0, b'n', 0, 0));
+    buf.push(EOD);
+    let r = DarReader::open(Cursor::new(buf)).expect("open");
+    assert_eq!(r.entries().len(), 1);
+    assert_eq!(r.entries()[0].path, "f10.txt");
+}
+
 // ── large infinint timestamps (0x40 encoding) ────────────────────────────────
 
 /// Inode where ctime uses a 0x40-encoded 8-byte infinint for the seconds value.
