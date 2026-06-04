@@ -51,6 +51,11 @@ const DAR_MAGIC: [u8; 4] = [0x00, 0x00, 0x00, 0x7b];
 /// Escape sequence marking the catalog: `AD FD EA 77 21 43`.
 const SEQT_CATALOGUE: [u8; 6] = [0xAD, 0xFD, 0xEA, 0x77, 0x21, 0x43];
 
+/// First archive format with an in-place (working-directory) path in the
+/// catalog header — `archive_version(11,1)` → `value() = 11*256 + 1`.
+/// Formats 8, 9, 10 and 11.0 have no such field.
+const FORMAT_11_1: u32 = 11 * 256 + 1;
+
 /// Errors returned by [`DarReader`].
 #[derive(Debug, Error)]
 pub enum DarError {
@@ -120,16 +125,17 @@ impl<R: Read + Seek> DarReader<R> {
         let archive_origin = reader.stream_position()?;
 
         // Read the format version string (NUL-terminated, at archive_origin).
-        // Encoding: each byte = value + 48.  Two bytes encode: major = b[0]*256 + b[1].
-        // Format 9 ("090") has no working-directory path in the catalog header;
-        // format 10+ includes one.  Seek back so find_catalogue scans from archive_origin.
+        // Each byte = value + 48.  libdar's archive_version::value() = major*256 + fix,
+        // where major = b[0]*256 + b[1] and fix = b[2] (archive_version.cpp).
         let version_str = read_nul_string(&mut reader).unwrap_or_default();
-        let format_version: u32 = {
+        let format_value: u32 = {
             let b = version_str.as_bytes();
-            if b.len() >= 2 {
-                u32::from(b[0].saturating_sub(48)) * 256 + u32::from(b[1].saturating_sub(48))
+            if b.len() >= 3 {
+                let major =
+                    u32::from(b[0].saturating_sub(48)) * 256 + u32::from(b[1].saturating_sub(48));
+                major * 256 + u32::from(b[2].saturating_sub(48))
             } else {
-                u32::MAX // unrecognised — assume modern format (has path field)
+                u32::MAX // unrecognised — assume newest format (has path field)
             }
         };
         reader.seek(SeekFrom::Start(archive_origin))?;
@@ -139,9 +145,10 @@ impl<R: Read + Seek> DarReader<R> {
         let via_escape = find_catalogue(&mut reader, &label)?;
         if via_escape {
             skip(&mut reader, 10)?; // catalog label
-                                    // Format 9 and earlier have no working-directory path field.
-                                    // Format 10+ include a NUL-terminated path (possibly non-empty).
-            if format_version >= 10 {
+            // The working-directory ("in_place") path exists only from format 11.1
+            // (libdar catalogue.cpp:157, gate `>= archive_version(11,1)`).  Formats 8,
+            // 9, 10 and 11.0 have none — skipping one there eats the first entry.
+            if format_value >= FORMAT_11_1 {
                 skip_nul_string(&mut reader)?;
             }
         }
