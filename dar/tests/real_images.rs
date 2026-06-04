@@ -112,6 +112,53 @@ fn v9_extracts_hello_txt() {
     assert_eq!(data, b"hello format 9\n");
 }
 
+// ── v8_hello.dar (DAR format 8.1, version_string "081") ──────────────────────
+//
+// Created with dar 2.4.24 (built from the SourceForge release tarball):
+//
+//   mkdir -p /tmp/v8_corpus/files
+//   printf 'hello format 8\n' > /tmp/v8_corpus/files/hello.txt
+//   /path/to/dar-2.4.24/dar -Q -c /tmp/v8_archive -R /tmp/v8_corpus -g files/hello.txt
+//   cp /tmp/v8_archive.1.dar v8_hello.dar
+//
+// Format 8 timestamps are bare seconds infinints (no 's'/'n' type byte) and the
+// inode carries no FSA — see docs/implementation-notes.md §11.
+// dar 2.4.24 source: <https://sourceforge.net/projects/dar/files/dar/2.4.24/>
+
+fn open_v8() -> DarReader<Cursor<Vec<u8>>> {
+    let path = format!("{DATA_DIR}/v8_hello.dar");
+    let data = std::fs::read(Path::new(&path)).unwrap_or_else(|e| panic!("read v8_hello.dar: {e}"));
+    DarReader::open(Cursor::new(data)).unwrap_or_else(|e| panic!("DarReader::open v8_hello.dar: {e}"))
+}
+
+#[test]
+fn v8_opens() {
+    let _ = open_v8();
+}
+
+#[test]
+fn v8_lists_one_entry() {
+    assert_eq!(open_v8().entries().len(), 1);
+}
+
+#[test]
+fn v8_entry_path_ends_with_hello_txt() {
+    assert!(open_v8().entries()[0].path.ends_with("files/hello.txt"));
+}
+
+#[test]
+fn v8_entry_size_is_15() {
+    assert_eq!(open_v8().entries()[0].size, 15);
+}
+
+#[test]
+fn v8_extracts_hello_txt() {
+    let mut r = open_v8();
+    let path = r.entries()[0].path.clone(); // virtual-root prefix is data-determined
+    let data = r.extract(&path).expect("extract");
+    assert_eq!(data, b"hello format 8\n");
+}
+
 // ── error cases ───────────────────────────────────────────────────────────────
 
 #[test]
