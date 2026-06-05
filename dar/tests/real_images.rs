@@ -209,6 +209,58 @@ fn v10_extracts_hello_txt() {
     assert_eq!(data, b"hello format 10\n");
 }
 
+// ── v7_hello.dar (DAR format 7, version_string "07") ─────────────────────────
+//
+// Created with dar 2.3.12 (built from the SourceForge release tarball in a
+// gcc:4.9 container — pre-2.4 C++ won't compile on a modern toolchain).
+//
+// Pre-format-8 archives are structurally different (see implementation-notes
+// §12): no `seqt_catalogue` escape — the catalog is located via the end
+// `terminateur` trailer; slice-header extension is 'N' (no TLV), so
+// archive_origin = 16; inode uid/gid are 2-byte u16 (not infinint); timestamps
+// are bare seconds infinints with no ctime; the per-file CRC is a fixed 2 bytes
+// (no length prefix); and there is no catalog label / no path field.
+//
+//   printf 'hello format 7\n' > /src/files/hello.txt
+//   /path/to/dar-2.3.12/dar -Q -c /work/v7 -R /src -g files/hello.txt
+//   cp /work/v7.1.dar v7_hello.dar
+//
+// dar 2.3.12 source: <https://sourceforge.net/projects/dar/files/dar/2.3.12/>
+
+fn open_v7() -> DarReader<Cursor<Vec<u8>>> {
+    let path = format!("{DATA_DIR}/v7_hello.dar");
+    let data = std::fs::read(Path::new(&path)).unwrap_or_else(|e| panic!("read v7_hello.dar: {e}"));
+    DarReader::open(Cursor::new(data)).unwrap_or_else(|e| panic!("DarReader::open v7_hello.dar: {e}"))
+}
+
+#[test]
+fn v7_opens() {
+    let _ = open_v7();
+}
+
+#[test]
+fn v7_lists_one_entry() {
+    assert_eq!(open_v7().entries().len(), 1);
+}
+
+#[test]
+fn v7_entry_path_ends_with_hello_txt() {
+    assert!(open_v7().entries()[0].path.ends_with("files/hello.txt"));
+}
+
+#[test]
+fn v7_entry_size_is_15() {
+    assert_eq!(open_v7().entries()[0].size, 15);
+}
+
+#[test]
+fn v7_extracts_hello_txt() {
+    let mut r = open_v7();
+    let path = r.entries()[0].path.clone();
+    let data = r.extract(&path).expect("extract");
+    assert_eq!(data, b"hello format 7\n");
+}
+
 // ── error cases ───────────────────────────────────────────────────────────────
 
 #[test]
