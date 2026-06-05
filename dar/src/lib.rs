@@ -315,6 +315,17 @@ fn scan_window<R: Read + Seek>(
 /// from there, then fall back to a full forward scan from `archive_origin` if
 /// needed.  This reduces the I/O for a 92 GiB archive from ~99 GiB to ~107 MiB.
 fn find_catalogue<R: Read + Seek>(r: &mut R, label: &[u8; 10]) -> Result<bool, DarError> {
+    find_catalogue_within(r, label, TAIL_SCAN)
+}
+
+/// Implementation of [`find_catalogue`] with the tail-scan window size as a
+/// parameter so the full-scan fallback can be exercised without a 256 MiB
+/// fixture.
+fn find_catalogue_within<R: Read + Seek>(
+    r: &mut R,
+    label: &[u8; 10],
+    tail_scan: u64,
+) -> Result<bool, DarError> {
     // All-zero labels cannot be used as a reliable catalog marker (too common
     // in zero-padded archive bodies).
     let use_label = !label.iter().all(|&b| b == 0);
@@ -326,8 +337,8 @@ fn find_catalogue<R: Read + Seek>(r: &mut R, label: &[u8; 10]) -> Result<bool, D
         return Err(DarError::Corrupt("archive body too short".into()));
     }
 
-    // Jump to at most TAIL_SCAN bytes before end; for small files this equals archive_origin.
-    let tail_start = archive_origin.max(file_end.saturating_sub(TAIL_SCAN));
+    // Jump to at most tail_scan bytes before end; for small files this equals archive_origin.
+    let tail_start = archive_origin.max(file_end.saturating_sub(tail_scan));
     r.seek(SeekFrom::Start(tail_start))?;
 
     if let Some(result) = scan_window(r, label, use_label)? {
@@ -958,10 +969,76 @@ mod tests {
         c.set_position(32);
         let err = skip(&mut c, 0x8000_0000_0000_0000).unwrap_err();
         assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
-        assert_eq!(
-            c.position(),
-            32,
-            "position must not move on a rejected skip"
-        );
+        assert_eq!(c.position(), 32); // unchanged on a rejected skip
+    }
+
+    // ── terminateur trailer (pre-8 catalog locator) ───────────────────────────
+
+    #[test]
+    fn terminateur_reads_catalogue_offset() {
+        // pos infinint 0x18 = 24; terminator 0xc0 → two leading ones → 2*4 = 8
+        // bytes back to the infinint.
+        let data = vec![0x80u8, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0xc0];
+        assert_eq!(read_terminateur(&mut Cursor::new(data)).unwrap(), 24);
+    }
+
+    #[test]
+    fn terminateur_all_ff_underflows_returns_corrupt() {
+        let err = read_terminateur(&mut Cursor::new(vec![0xFFu8; 4])).unwrap_err();
+        assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn terminateur_excessive_ff_padding_returns_corrupt() {
+        let err = read_terminateur(&mut Cursor::new(vec![0xFFu8; 600])).unwrap_err();
+        assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn terminateur_low_terminator_byte_returns_corrupt() {
+        // Terminator byte 0x01 has no top bit set.
+        let data = vec![0x80u8, 0x00, 0x00, 0x00, 0x18, 0x01];
+        let err = read_terminateur(&mut Cursor::new(data)).unwrap_err();
+        assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn terminateur_noncontiguous_high_bits_returns_corrupt() {
+        // 0xA0 = 1010_0000: top bit set but the high-bit run is not contiguous.
+        let data = vec![0x80u8, 0x00, 0x00, 0x00, 0x18, 0xA0];
+        let err = read_terminateur(&mut Cursor::new(data)).unwrap_err();
+        assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+    }
+
+    // ── find_catalogue: full-scan fallback + body-too-short ────────────────────
+
+    #[test]
+    fn find_catalogue_falls_back_to_full_scan() {
+        // Escape near the start; a tiny tail window misses it, forcing the
+        // archive_origin full-scan fallback.
+        let mut data = vec![0x11u8, 0x22]; // junk before the escape
+        data.extend_from_slice(&SEQT_CATALOGUE);
+        data.extend_from_slice(&[0x33u8; 12]); // trailing bytes beyond the tail window
+        let mut c = Cursor::new(data);
+        let via_escape = find_catalogue_within(&mut c, &[0u8; 10], 4).unwrap();
+        assert!(via_escape);
+        assert_eq!(c.position(), 2 + SEQT_CATALOGUE.len() as u64);
+    }
+
+    #[test]
+    fn find_catalogue_full_scan_miss_returns_not_found() {
+        // No escape and no matching label anywhere; a tiny tail window forces
+        // the full-scan fallback, which also misses → "not found".
+        let mut c = Cursor::new(vec![0x11u8; 16]);
+        let err = find_catalogue_within(&mut c, &[0xABu8; 10], 4).unwrap_err();
+        assert!(matches!(&err, DarError::Corrupt(s) if s == "seqt_catalogue not found"));
+    }
+
+    #[test]
+    fn find_catalogue_body_too_short_when_origin_at_eof() {
+        let mut c = Cursor::new(vec![0u8; 6]);
+        c.seek(SeekFrom::Start(6)).unwrap();
+        let err = find_catalogue(&mut c, &[0u8; 10]).unwrap_err();
+        assert!(matches!(&err, DarError::Corrupt(s) if s == "archive body too short"));
     }
 }

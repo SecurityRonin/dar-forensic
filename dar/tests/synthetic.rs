@@ -595,3 +595,119 @@ fn extract_gigantic_stored_size_does_not_allocate() {
     let err = r.extract("bomb.bin").unwrap_err();
     assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
 }
+
+// ── slice-header extension branches ──────────────────────────────────────────
+
+/// A format-8+ header ('T' extension) truncated before the TLV count must map
+/// the I/O shortage to a clear "truncated TLV block" Corrupt error.
+#[test]
+fn truncated_tlv_block_returns_corrupt() {
+    let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b]; // magic
+    buf.extend_from_slice(&[0u8; 10]); // label
+    buf.push(0x00); // flag
+    buf.push(b'T'); // extension = TLV — but no TLV count byte follows
+    let Err(err) = DarReader::open(Cursor::new(buf)) else {
+        panic!("expected Err, got Ok");
+    };
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("truncated TLV")));
+}
+
+/// An unrecognised slice-header extension byte must be rejected as corrupt.
+#[test]
+fn unknown_extension_returns_corrupt() {
+    let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b];
+    buf.extend_from_slice(&[0u8; 10]);
+    buf.push(0x00); // flag
+    buf.push(0x00); // extension — not 'T'/'N'/'S'
+    let Err(err) = DarReader::open(Cursor::new(buf)) else {
+        panic!("expected Err, got Ok");
+    };
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("unknown slice-header extension")));
+}
+
+/// The 'S' (size) extension stores a slice-size infinint before the data layer;
+/// a reader must consume it (then locate the catalog via the terminateur).
+#[test]
+fn size_extension_consumes_slice_size() {
+    let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b];
+    buf.extend_from_slice(&[0u8; 10]);
+    buf.push(0x00); // flag
+    buf.push(b'S'); // extension = size
+    buf.extend_from_slice(&inf(0)); // slice-size infinint (consumed)
+    buf.extend_from_slice(b"07\x00"); // archive_version (format 7)
+                                      // No valid terminateur follows → open fails, but the slice-size path ran.
+    let Err(err) = DarReader::open(Cursor::new(buf)) else {
+        panic!("expected Err, got Ok");
+    };
+    assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+}
+
+/// A pre-8 ('N') archive whose terminateur points beyond the archive end must be
+/// rejected, not seek out of bounds.
+#[test]
+fn legacy_catalogue_past_end_returns_corrupt() {
+    let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b];
+    buf.extend_from_slice(&[0u8; 10]);
+    buf.push(0x00); // flag
+    buf.push(b'N'); // extension = none (legacy)
+    buf.extend_from_slice(b"07\x00"); // archive_version (format 7)
+                                      // terminateur: pos infinint = 10_000 (far past EOF) + "00 00 00 c0" marker
+                                      // (two leading 1-bits → 2*4 = 8 bytes back to the 5-byte infinint).
+    buf.extend_from_slice(&inf(10_000));
+    buf.extend_from_slice(&[0x00, 0x00, 0x00, 0xc0]);
+    let Err(err) = DarReader::open(Cursor::new(buf)) else {
+        panic!("expected Err, got Ok");
+    };
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("past archive end")));
+}
+
+// ── extract: offset beyond archive end (no overflow) ─────────────────────────
+
+/// An archive_offset that lands past EOF (without overflowing) must be rejected.
+#[test]
+fn extract_offset_past_archive_end_returns_corrupt() {
+    let dar = minimal_dar(vec![file_entry("x.bin", 0, b'n', 100_000, 0)]);
+    let mut r = DarReader::open(Cursor::new(dar)).expect("open");
+    let err = r.extract("x.bin").unwrap_err();
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("past archive end")));
+}
+
+// ── FSA block is skipped (format 9+ inode with the FSA-full bit) ─────────────
+
+/// A file entry with the inode FSA-full bit (0x10) set, followed by an FSA
+/// block (family tag + size + data), must be parsed by skipping the block.
+#[test]
+fn entry_with_fsa_block_is_listed() {
+    let mut entry = vec![0x06u8]; // 'f'
+    entry.extend_from_slice(b"fsa.txt\x00");
+    entry.extend(inode_base(true)); // flags 0x10 + the two FSA inode infinints
+    entry.extend_from_slice(&inf(264)); // FSA family tag
+    entry.extend_from_slice(&inf(2)); // FSA data size
+    entry.extend_from_slice(&[0xAA, 0xBB]); // FSA data
+    entry.extend_from_slice(&inf(0)); // size
+    entry.extend_from_slice(&inf(0)); // archive_offset
+    entry.extend_from_slice(&inf(0)); // stored_size
+    entry.push(0x00); // encryption = none
+    entry.push(b'n'); // compression = none
+    entry.extend_from_slice(&inf(0)); // crc_size
+    let dar = minimal_dar(vec![entry]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert_eq!(r.entries()[0].path, "fsa.txt");
+}
+
+/// A symlink entry carrying an FSA block (FSA-full inode bit) must be skipped
+/// in full so the following entry still parses.
+#[test]
+fn symlink_with_fsa_block_is_skipped() {
+    let mut sym = vec![0x0cu8]; // cat_sig → 'l'
+    sym.extend_from_slice(b"link\x00");
+    sym.extend(inode_base(true)); // flags 0x10 + the two FSA inode infinints
+    sym.extend_from_slice(&inf(264)); // FSA family tag
+    sym.extend_from_slice(&inf(2)); // FSA data size
+    sym.extend_from_slice(&[0xAA, 0xBB]); // FSA data
+    sym.extend_from_slice(b"/target\x00"); // symlink target
+    let dar = minimal_dar(vec![sym, file_entry("after.txt", 0, b'n', 0, 0)]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
+    assert_eq!(paths, ["after.txt"]);
+}
