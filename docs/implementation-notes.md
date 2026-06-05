@@ -87,6 +87,11 @@ extraction purposes and is not re-parsed.
 
 ## 4. Inode bit 4 governs layout size AND FSA presence
 
+> Empirical notes from a v11.3 archive. The two "nlink/field9" infinints are
+> actually the FSA-status inode fields, and the layout is version-dependent —
+> see §11 (formats 8–11) and §12 (legacy ≤7) for the authoritative, libdar-cited
+> per-version field map.
+
 The first byte of every inode is a **flags** byte. Bit 4 (`0x10`) controls
 three things simultaneously:
 
@@ -144,6 +149,10 @@ meaning for extraction. Only `data_size` is needed to skip past the block.
 ---
 
 ## 6. Catalog structure and termination
+
+> The NUL working-directory path shown below exists only from format 11.1 (§11),
+> and the `seqt_catalogue` escape only from format 8 — pre-8 archives are located
+> via the end terminateur trailer (§12).
 
 The catalog is located by scanning for the 6-byte escape:
 
@@ -356,3 +365,46 @@ is invisible when reading unencrypted archives.
   not-saved `file_data_status` byte; **still no catalog in_place path** (that
   starts at 11.1).
 ```
+
+---
+
+## 12. Pre-format-8 (legacy ≤7) layout
+
+Reverse-documented from libdar v2.8.5 read guards (`reading_ver < 8` / `<= 7` /
+`> 1`) and validated byte-for-byte against a real dar-2.3.12 format-7 archive
+(`dar/tests/data/v7_hello.dar`). Formats ≤7 differ structurally from 8+:
+
+**Slice header & extension** (`header.cpp`): after magic + 10-byte label come a
+flag byte and an *extension* byte. `'T'` (format 8+) introduces a TLV list;
+`'N'` (none) / `'S'` (size — followed by a slice-size infinint) are pre-8 and
+have **no TLV list**, so `archive_origin` = the byte after the extension (16
+for a single-TLV-less header). `header_version` for <8 stores a 3-byte
+`version_string` (`"NN"` + NUL, no fix byte, no header CRC).
+
+**Catalogue location — the `terminateur` trailer** (`terminateur.cpp:95-138`):
+pre-8 archives have **no `seqt_catalogue` escape**. The catalogue is found from
+the archive end: count trailing `0xFF` padding (×8 bits), then the first
+non-`0xFF` byte contributes its set high bits; `byte_offset = total_bits × 4` is
+the distance back to the catalogue-position infinint, which gives the catalogue
+start relative to `archive_origin`. (This trailer also exists in 8–11 as a
+universal locator; this reader uses it only for ≤7 and the escape scan for 8+.)
+
+**Catalogue framing**: pre-8 has **no 10-byte ref label, no in-place path, no
+trailing catalogue CRC** (all gated `reading_ver > 7` in `catalogue.cpp`). The
+root entry is named `"root"` (kept in paths, like the format-9 fixtures).
+
+**cat_inode** (`cat_inode.cpp`): `flag(1) · uid(u16) · gid(u16) · perm(u16) ·
+atime · mtime`. uid/gid are 2-byte `ntohs` (not infinint) for ≤7; timestamps
+are bare seconds infinints (no unit byte, <9); **no ctime** (added at 8); no
+FSA (added at 9).
+
+**cat_file** (`cat_file.cpp`, `crc.cpp`): `size · offset · storage_size`, then
+**no encryption/compression bytes** and a **fixed 2-byte CRC** (no length
+prefix). `storage_size == 0` means the data is stored uncompressed (= logical
+size). Data at `archive_origin + offset` is the raw file content.
+
+**Distinct legacy profiles**: formats 2–7 share the above grammar (the only
+intra-range split is `reading_ver > 1` for `storage_size`); **format 1** (dar
+1.x) additionally omits the EA flag byte and the file CRC and synthesises
+storage_size. Format 1 is unvalidated (no dar 1.x binary builds on a modern
+toolchain) and treated as best-effort.
