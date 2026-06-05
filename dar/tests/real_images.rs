@@ -230,7 +230,8 @@ fn v10_extracts_hello_txt() {
 fn open_v7() -> DarReader<Cursor<Vec<u8>>> {
     let path = format!("{DATA_DIR}/v7_hello.dar");
     let data = std::fs::read(Path::new(&path)).unwrap_or_else(|e| panic!("read v7_hello.dar: {e}"));
-    DarReader::open(Cursor::new(data)).unwrap_or_else(|e| panic!("DarReader::open v7_hello.dar: {e}"))
+    DarReader::open(Cursor::new(data))
+        .unwrap_or_else(|e| panic!("DarReader::open v7_hello.dar: {e}"))
 }
 
 #[test]
