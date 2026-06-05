@@ -56,12 +56,12 @@ println!("{}", String::from_utf8_lossy(&data));
 
 | DAR format | `version_string` | Status |
 |------------|------------------|--------|
-| Format 7 (dar 2.3) | `"07"` | Supported — validated against a dar 2.3.12 fixture |
-| Format 8 (dar 2.4) | `"081"` | Supported — validated against a dar 2.4.24 fixture |
-| Format 9 (dar 2.5) | `"090"` | Supported — validated against a dar 2.5.3 fixture and a real Passware archive |
-| Format 10 (dar 2.6) | `"0:1"` | Supported — validated against a dar 2.6.16 fixture |
 | Format 11 (dar 2.7–2.8) | e.g. `"0;3"` (11.3) | Supported — validated against a dar 2.8.5 fixture |
+| Format 10 (dar 2.6) | `"0:1"` | Supported — validated against a dar 2.6.16 fixture |
+| Format 9 (dar 2.5) | `"090"` | Supported — validated against a dar 2.5.3 fixture and a real Passware archive |
 | Passware Mobile variant | `"090"`, no `seqt_catalogue` escape | Supported — label-scan catalog location |
+| Format 8 (dar 2.4) | `"081"` | Supported — validated against a dar 2.4.24 fixture |
+| Format 7 (dar 2.3) | `"07"` | Supported — validated against a dar 2.3.12 fixture |
 | Formats 2–6 (dar 2.0–2.3) | `"02"`–`"06"` | Same legacy grammar as 7; parsed but not yet validated against a fixture |
 | Format 1 (dar 1.x) | `"01"` | Best-effort; unvalidated (no buildable dar 1.x) |
 | Archive creation / writing | — | Not supported (reader only) |
