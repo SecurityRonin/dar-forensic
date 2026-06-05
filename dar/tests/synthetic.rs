@@ -36,7 +36,7 @@ fn inode_base(bit4: bool) -> Vec<u8> {
 fn header() -> Vec<u8> {
     let mut v = vec![0x00u8, 0x00, 0x00, 0x7b]; // magic
     v.extend_from_slice(&[0u8; 10]); // internal_name
-    v.extend_from_slice(&[0x00, 0x00]); // flag + ext_char
+    v.extend_from_slice(&[0x00, b'T']); // flag + extension ('T' = TLV / format 8+)
     v.extend_from_slice(&inf(0)); // TLV count = 0
     v
 }
@@ -146,7 +146,7 @@ fn minimal_dar(files: Vec<Vec<u8>>) -> Vec<u8> {
 fn corrupt_infinint_in_header_preserves_cause() {
     let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b]; // magic
     buf.extend_from_slice(&[0u8; 10]); // label
-    buf.extend_from_slice(&[0x00, 0x00]); // flag + ext_char
+    buf.extend_from_slice(&[0x00, b'T']); // flag + extension ('T' = TLV / format 8+)
     buf.push(0x03); // invalid terminal — two bits set
     buf.extend_from_slice(&[0x00u8; 4]);
 
@@ -291,7 +291,7 @@ fn catalog_without_escape_lists_entries() {
 
     let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b]; // magic
     buf.extend_from_slice(&LABEL); // internal_name
-    buf.extend_from_slice(&[0x00, 0x00]); // flag + ext_char
+    buf.extend_from_slice(&[0x00, b'T']); // flag + extension ('T' = TLV / format 8+)
     buf.extend_from_slice(&inf(0)); // TLV count = 0 → archive_origin = 21
 
     // File data — use non-zero bytes so the label won't false-match in the body.
@@ -316,7 +316,7 @@ fn catalog_without_escape_extracts_correctly() {
 
     let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b];
     buf.extend_from_slice(&LABEL);
-    buf.extend_from_slice(&[0x00, 0x00]);
+    buf.extend_from_slice(&[0x00, b'T']); // flag + extension ('T' = TLV / format 8+)
     buf.extend_from_slice(&inf(0)); // archive_origin = 21
 
     buf.extend_from_slice(b"HELLOWORLD"); // 10 bytes of payload at archive_origin

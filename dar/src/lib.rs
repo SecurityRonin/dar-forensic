@@ -110,54 +110,66 @@ impl<R: Read + Seek> DarReader<R> {
 
         let mut label = [0u8; 10];
         reader.read_exact(&mut label)?; // internal_name label
-        skip(&mut reader, 2)?; // flag + ext_char
+        let _flag = read_u8(&mut reader)?; // slice flag ('T' terminal / 'N' / 'E')
+        let extension = read_u8(&mut reader)?; // 'T' = TLV (format 8+); 'N'/'S' = legacy (<= 7)
 
-        // TLV list: infinint(count) then count × (u16 type + infinint len + data)
-        let tlv_count = read_infinint(&mut reader).map_err(|e| match e {
-            DarError::Io(_) => DarError::Corrupt("truncated TLV block".into()),
-            other => other,
-        })?;
-        for _ in 0..tlv_count {
-            skip(&mut reader, 2)?;
-            let len = read_infinint(&mut reader)?;
-            skip(&mut reader, len)?;
-        }
-
-        // Everything after the TLV block is addressed by archive_offset.
-        let archive_origin = reader.stream_position()?;
-
-        // Read the format version string (NUL-terminated, at archive_origin).
-        // Each byte = value + 48.  libdar's archive_version::value() = major*256 + fix,
-        // where major = b[0]*256 + b[1] and fix = b[2] (archive_version.cpp).
-        let version_str = read_nul_string(&mut reader).unwrap_or_default();
-        let format_value: u32 = {
-            let b = version_str.as_bytes();
-            if b.len() >= 3 {
-                let major =
-                    u32::from(b[0].saturating_sub(48)) * 256 + u32::from(b[1].saturating_sub(48));
-                major * 256 + u32::from(b[2].saturating_sub(48))
-            } else {
-                u32::MAX // unrecognised — assume newest format (has path field)
+        // Format 8+ carries a TLV list and a `seqt_catalogue` escape; format <= 7
+        // has neither — its catalogue is located via the end `terminateur` trailer
+        // (libdar header.cpp extension handling; terminateur.cpp).
+        let entries;
+        let archive_origin;
+        if extension == b'T' {
+            // TLV list: infinint(count) then count × (u16 type + infinint len + data)
+            let tlv_count = read_infinint(&mut reader).map_err(|e| match e {
+                DarError::Io(_) => DarError::Corrupt("truncated TLV block".into()),
+                other => other,
+            })?;
+            for _ in 0..tlv_count {
+                skip(&mut reader, 2)?;
+                let len = read_infinint(&mut reader)?;
+                skip(&mut reader, len)?;
             }
-        };
-        reader.seek(SeekFrom::Start(archive_origin))?;
 
-        // Returns true if the standard escape was found (catalog has label + path prefix),
-        // false if catalog was located via the archive label directly (no prefix to skip).
-        let via_escape = find_catalogue(&mut reader, &label)?;
-        if via_escape {
-            skip(&mut reader, 10)?; // catalog label
-                                    // The working-directory ("in_place") path exists only from format 11.1
-                                    // (libdar catalogue.cpp:157, gate `>= archive_version(11,1)`).  Formats 8,
-                                    // 9, 10 and 11.0 have none — skipping one there eats the first entry.
-            if format_value >= FORMAT_11_1 {
-                skip_nul_string(&mut reader)?;
+            archive_origin = reader.stream_position()?;
+            let format_value = read_format_value(&mut reader);
+            reader.seek(SeekFrom::Start(archive_origin))?;
+
+            // true → standard escape found (catalog has label + maybe path);
+            // false → located via the archive label directly (Passware: no prefix).
+            let via_escape = find_catalogue(&mut reader, &label)?;
+            if via_escape {
+                skip(&mut reader, 10)?; // catalog label
+                                        // The in-place path exists only from format 11.1
+                                        // (catalogue.cpp:157). Formats 8/9/10/11.0 have none.
+                if format_value >= FORMAT_11_1 {
+                    skip_nul_string(&mut reader)?;
+                }
             }
+            entries = parse_catalog(&mut reader, format_value >> 8)?;
+        } else if extension == b'N' || extension == b'S' {
+            if extension == b'S' {
+                read_infinint(&mut reader)?; // slice size (multi-slice header); unused
+            }
+            archive_origin = reader.stream_position()?;
+            let format_value = read_format_value(&mut reader); // 3-byte edition: value = major*256
+            let cat_offset = read_terminateur(&mut reader)?;
+            let cat_start = archive_origin
+                .checked_add(cat_offset)
+                .ok_or_else(|| DarError::Corrupt("catalogue offset overflows".into()))?;
+            let end = reader.seek(SeekFrom::End(0))?;
+            if cat_start >= end {
+                return Err(DarError::Corrupt(format!(
+                    "catalogue start {cat_start} past archive end {end}"
+                )));
+            }
+            reader.seek(SeekFrom::Start(cat_start))?;
+            // Legacy catalogue: no 10-byte label, no path — entries begin here.
+            entries = parse_catalog(&mut reader, format_value >> 8)?;
+        } else {
+            return Err(DarError::Corrupt(format!(
+                "unknown slice-header extension {extension:#04x}"
+            )));
         }
-
-        // major edition = value() >> 8 (value = major*256 + fix). Drives the
-        // version-dependent inode/timestamp layout in parse_catalog.
-        let entries = parse_catalog(&mut reader, format_value >> 8)?;
 
         Ok(Self {
             inner: reader,
@@ -333,6 +345,80 @@ fn find_catalogue<R: Read + Seek>(r: &mut R, label: &[u8; 10]) -> Result<bool, D
     Err(DarError::Corrupt("seqt_catalogue not found".into()))
 }
 
+/// Read the NUL-terminated `version_string` at the current position and return
+/// `archive_version::value()` = `major*256 + fix`, where `major = b0*256 + b1`
+/// and each byte is `value + 48`. Format <= 7 stores only `"NN"` (fix implicitly
+/// 0); format 8+ stores `"NNf"`. Returns `u32::MAX` for an unreadable string so
+/// an unknown future format is treated as newest.
+fn read_format_value<R: Read>(r: &mut R) -> u32 {
+    let s = read_nul_string(r).unwrap_or_default();
+    let b = s.as_bytes();
+    if b.len() >= 2 {
+        let major = u32::from(b[0].saturating_sub(48)) * 256 + u32::from(b[1].saturating_sub(48));
+        let fix = if b.len() >= 3 {
+            u32::from(b[2].saturating_sub(48))
+        } else {
+            0
+        };
+        major * 256 + fix
+    } else {
+        u32::MAX
+    }
+}
+
+/// Locate the catalogue in a pre-format-8 archive via the end `terminateur`
+/// trailer (libdar terminateur.cpp:95-138), returning the catalogue start offset
+/// relative to `archive_origin`.
+///
+/// From EOF, count trailing `0xFF` padding bytes (8 bits each); the first
+/// non-`0xFF` byte encodes the remaining count in unary as its set high bits.
+/// `byte_offset = total_bits * 4` is the distance back from that byte to the
+/// catalogue-position infinint. The `0xFF` run is bounded so a hostile all-`0xFF`
+/// tail cannot spin or overflow.
+fn read_terminateur<R: Read + Seek>(r: &mut R) -> Result<u64, DarError> {
+    const BLOCK_SIZE: u64 = 4;
+    const MAX_BITS: u64 = 4096; // far beyond any real terminator
+
+    let mut pos = r.seek(SeekFrom::End(0))?;
+    let mut bits: u64 = 0;
+    let terminal = loop {
+        if pos == 0 {
+            return Err(DarError::Corrupt("terminator underflows archive".into()));
+        }
+        pos -= 1;
+        r.seek(SeekFrom::Start(pos))?;
+        let b = read_u8(r)?;
+        if b == 0xFF {
+            bits += 8;
+            if bits > MAX_BITS {
+                return Err(DarError::Corrupt("terminator padding too long".into()));
+            }
+        } else {
+            break b;
+        }
+    };
+    // The terminator byte must have its top bit set; count consecutive set MSBs.
+    if terminal & 0x80 == 0 {
+        return Err(DarError::Corrupt(format!(
+            "invalid terminator byte {terminal:#04x}"
+        )));
+    }
+    let mut x = terminal;
+    while x != 0 {
+        if x & 0x80 == 0 {
+            return Err(DarError::Corrupt("malformed terminator bit run".into()));
+        }
+        bits += 1;
+        x <<= 1;
+    }
+    let byte_offset = bits * BLOCK_SIZE;
+    let infinint_start = pos
+        .checked_sub(byte_offset)
+        .ok_or_else(|| DarError::Corrupt("terminator offset underflows".into()))?;
+    r.seek(SeekFrom::Start(infinint_start))?;
+    read_infinint(r)
+}
+
 /// Parse all catalog entries, returning file entries with their extraction info.
 ///
 /// Stops when the root directory is closed (depth reaches zero) or an unknown
@@ -382,11 +468,25 @@ fn parse_catalog<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<Vec<Ent
 
                 let size = read_infinint(r)?;
                 let archive_offset = read_infinint(r)?;
-                let stored_size = read_infinint(r)?;
-                let encryption_flag = read_u8(r)?;
-                let compression = read_u8(r)?;
-                let crc_size = read_infinint(r)?;
-                skip(r, crc_size)?;
+                let mut stored_size = read_infinint(r)?;
+                // Format <= 7 has no per-file encryption/compression bytes and a
+                // fixed 2-byte CRC (no length prefix); format 8+ stores both bytes
+                // and a length-prefixed CRC (libdar cat_file.cpp:160-252, crc.cpp).
+                let (encryption_flag, compression) = if format_major >= 8 {
+                    (read_u8(r)?, read_u8(r)?)
+                } else {
+                    (0u8, b'n')
+                };
+                if format_major >= 8 {
+                    let crc_size = read_infinint(r)?;
+                    skip(r, crc_size)?;
+                } else {
+                    skip(r, 2)?; // fixed 2-byte CRC
+                }
+                // Pre-8: storage_size 0 means the data is stored uncompressed.
+                if format_major <= 7 && stored_size == 0 {
+                    stored_size = size;
+                }
 
                 let path = if dir_stack.is_empty() {
                     name
@@ -548,14 +648,22 @@ fn skip_timestamp<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<(), Da
 ///   FSA inode fields (format 9+ only): two infinints when (flags >> 4) & 1 == 1.
 fn read_inode_base<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<u8, DarError> {
     let flags = read_u8(r)?;
-    read_infinint(r)?; // uid
-    read_infinint(r)?; // gid
+    // uid/gid: 2-byte u16 for format <= 7 (libdar cat_inode.cpp:171), infinint for 8+.
+    if format_major <= 7 {
+        skip(r, 4)?; // uid (u16) + gid (u16)
+    } else {
+        read_infinint(r)?; // uid
+        read_infinint(r)?; // gid
+    }
     skip(r, 2)?; // perms (always a 2-byte big-endian u16, never an infinint)
-    skip_timestamp(r, format_major)?;
-    skip_timestamp(r, format_major)?;
-    skip_timestamp(r, format_major)?;
+    skip_timestamp(r, format_major)?; // atime
+    skip_timestamp(r, format_major)?; // mtime
+                                      // ctime (last_cha) exists only from format 8 (libdar cat_inode.cpp:197).
+    if format_major >= 8 {
+        skip_timestamp(r, format_major)?;
+    }
     // FSA inode fields exist only from format 9 (libdar cat_inode.cpp:264); bit
-    // 0x10 is the FSA-full status. Format 8 has no FSA, so never read these there.
+    // 0x10 is the FSA-full status. Formats <= 8 have no FSA.
     if format_major >= 9 && (flags >> 4) & 1 != 0 {
         read_infinint(r)?;
         read_infinint(r)?;
