@@ -4,6 +4,38 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`DarReader::audit()` — forensic anomaly detection.** Walks the parsed
+  catalogue (no archive data read) and returns severity-graded `Anomaly`
+  findings, most-severe first: incomplete catalogue, entries using a
+  recognised-but-undecodable codec (lzo/zstd/lz4), absolute paths, `..`
+  parent-traversal, duplicate paths, implausibly-far-future timestamps (beyond
+  the year-2100 ceiling), and control bytes in names. Each finding carries a
+  stable `code`, a `Severity`, and a human-readable note framed as an
+  observation ("consistent with …"), not a conclusion. Mirrors the sibling
+  forensic crates' findings vocabulary.
+- **Optional `serde` feature** derives `Serialize` on the `audit()` finding
+  types (`Severity`, `AnomalyKind`, `Anomaly`) for JSON/structured export. Off
+  by default — the core reader keeps zero serialization dependencies.
+- **`DarReader::extract_to<W: Write>(path, &mut out)`** streams an entry's
+  (decompressed) bytes straight to any writer without buffering the whole file,
+  returning the byte count; safe for multi-GiB entries. `extract()` now
+  delegates to it.
+- **`DarReader::is_complete()`** reports whether the catalogue parsed to a clean
+  root end-of-directory; an unmodelled entry type or truncation marks the
+  listing incomplete (loud, not a silently short listing).
+
+### Changed
+
+- **BREAKING: `DarEntry` now exposes full forensic metadata** — `path` is raw
+  bytes (`Vec<u8>`, with `path_lossy()` for display; a non-UTF-8 filename no
+  longer fails `open()`), plus `kind` (`EntryKind`), `uid`, `gid`, `mode`,
+  `atime`, `mtime`, `ctime`, and `symlink_target`. `entries()` now lists every
+  inode type (files, directories, symlinks, pipes, sockets), not just files.
+
 ## [0.3.0] — 2026-06-06
 
 ### Added

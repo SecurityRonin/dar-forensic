@@ -25,12 +25,18 @@ use dar_forensic::DarReader;
 let mut reader = DarReader::open(File::open("userdata.1.dar")?)?;
 
 for entry in reader.entries() {
-    println!("{} ({} bytes)", entry.path, entry.size);
+    println!("{} ({} bytes)", entry.path_lossy(), entry.size);
 }
 
 // Extract one file — a direct seek to its catalog offset, no scanning.
 let data = reader.extract("root/etc/hostname")?;
 println!("{}", String::from_utf8_lossy(&data));
+
+// Forensic audit — flag catalogue anomalies (metadata only, no data read).
+for finding in reader.audit() {
+    // e.g. [MEDIUM] DAR-PATH-TRAVERSAL: entry `../../etc/cron.d/x` contains a `..` …
+    eprintln!("{finding}");
+}
 # Ok::<(), dar_forensic::DarError>(())
 ```
 
@@ -46,6 +52,7 @@ DAR is a C++ format; the reference implementation (`libdar`) is GPL with C bindi
 | Random-access extraction (`Read + Seek`) | ✅ | ✅ — composes with `ewf`, `vmdk`, … |
 | Transparent gzip / bzip2 / xz decompression | ✅ | ✅ — pure-Rust decoders, no C |
 | Tail-scan for 90+ GiB archives (≈107 MiB read, not 99 GiB) | — | ✅ |
+| Forensic anomaly audit (`audit()` → severity-graded findings) | — | ✅ — incomplete catalogue, path-traversal, undecodable codec, … (serde-exportable) |
 | Hardened against malicious input (no panic / OOM / backward seek) | — | ✅ |
 | Continuous fuzzing | — | ✅ `cargo fuzz` |
 | 100% line coverage, CI-enforced | — | ✅ |
