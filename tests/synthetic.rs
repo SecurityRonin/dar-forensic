@@ -944,3 +944,101 @@ fn e2e_legacy_terminator_malformed_bit_run_returns_corrupt() {
     let err = open_err(dar);
     assert!(matches!(&err, DarError::Corrupt(s) if s.contains("malformed terminator")));
 }
+
+// ── DAR format edition 1 (dar 1.0.x, 2002) ────────────────────────────────────
+//
+// Clean-room synthetic edition-1 archives, byte-built from the layout
+// reverse-engineered from a real dar 1.0.0 archive (see the dar-format-1-layout
+// note). Edition 1 differs from formats 2–7: the inode has NO leading flag byte,
+// no ctime, no FSA; cat_file is just size·offset (no storage_size, no CRC); the
+// root dir is named "root"; dar 1.x is gzip-only and (with -z) compresses the
+// terminateur-located catalogue as a single zlib stream.
+
+/// A format-1 inode body: uid(u16) · gid(u16) · perm(u16) · atime · mtime.
+fn inode_v1() -> Vec<u8> {
+    let mut v = vec![0x03, 0xe8, 0x03, 0xe8, 0x01, 0xa4]; // uid 1000, gid 1000, perm 0o644
+    v.extend_from_slice(&inf(1_600_000_000)); // atime
+    v.extend_from_slice(&inf(1_600_000_000)); // mtime
+    v
+}
+
+/// Build a single-file edition-1 archive (`root/hello.txt`). `comp` is `b'n'`
+/// (stored) or `b'z'` (gzip — both the file data and the catalogue are zlib
+/// streams). The payload is chosen to compress smaller than its size.
+fn edition1(comp: u8) -> (Vec<u8>, Vec<u8>) {
+    use flate2::{write::ZlibEncoder, Compression};
+    use std::io::Write;
+    let zlib = |raw: &[u8]| {
+        let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
+        e.write_all(raw).unwrap();
+        e.finish().unwrap()
+    };
+    let content: Vec<u8> = if comp == b'z' {
+        std::iter::repeat(b"edition-1 payload 0123456789 ")
+            .take(40)
+            .flatten()
+            .copied()
+            .collect()
+    } else {
+        b"hello format 1\n".to_vec()
+    };
+    let size = content.len() as u32;
+    let data = if comp == b'z' {
+        zlib(&content)
+    } else {
+        content.clone()
+    };
+
+    let data_off: u32 = 4; // after "01\0" + comp byte, relative to archive_origin
+    let mut cat = Vec::new();
+    cat.push(0x04); // 'd'
+    cat.extend_from_slice(b"root\x00");
+    cat.extend(inode_v1());
+    cat.push(0x06); // 'f'
+    cat.extend_from_slice(b"hello.txt\x00");
+    cat.extend(inode_v1());
+    cat.extend_from_slice(&inf(size)); // size
+    cat.extend_from_slice(&inf(data_off)); // archive_offset (no storage_size/CRC)
+    cat.push(EOD);
+    let cat_on_disk = if comp == b'z' { zlib(&cat) } else { cat };
+
+    let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b]; // magic
+    buf.extend_from_slice(b"0000000001"); // internal_name (10 bytes)
+    buf.push(0x00); // flag
+    buf.push(b'N'); // ext = legacy (pre-8)
+                    // archive_origin = 16
+    buf.extend_from_slice(b"01\x00"); // version_string → format 1
+    buf.push(comp); // global compression char
+    buf.extend_from_slice(&data); // file data at offset 4
+    let cat_off = (4 + data.len()) as u32; // catalogue offset relative to origin
+    buf.extend_from_slice(&cat_on_disk);
+    // terminateur: inf(cat_off) then 3 pad bytes + 0xc0 (2 high bits → 8 = 5+3 back)
+    buf.extend_from_slice(&inf(cat_off));
+    buf.extend_from_slice(&[0x00, 0x00, 0x00, 0xc0]);
+    (buf, content)
+}
+
+#[test]
+fn v1_stored_lists_and_extracts() {
+    let (dar, content) = edition1(b'n');
+    let mut r = DarReader::open(Cursor::new(dar)).expect("open edition-1 stored");
+    let entries = r.entries();
+    assert_eq!(
+        entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+        ["root/hello.txt"]
+    );
+    assert_eq!(entries[0].size, content.len() as u64);
+    assert_eq!(r.extract("root/hello.txt").expect("extract"), content);
+}
+
+#[test]
+fn v1_gzip_catalogue_lists_and_extracts() {
+    let (dar, content) = edition1(b'z');
+    let mut r = DarReader::open(Cursor::new(dar)).expect("open edition-1 gzip");
+    let entries = r.entries();
+    assert_eq!(
+        entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+        ["root/hello.txt"]
+    );
+    assert_eq!(r.extract("root/hello.txt").expect("extract"), content);
+}
