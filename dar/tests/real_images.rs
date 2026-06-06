@@ -23,7 +23,7 @@
 //! dar 2.5.3 source: <https://sourceforge.net/projects/dar/files/dar/2.5.3/>
 //! Contents: files/hello.txt — 15 bytes: "hello format 9\n"
 
-use dar::DarReader;
+use dar_forensic::DarReader;
 use std::io::Cursor;
 use std::path::Path;
 

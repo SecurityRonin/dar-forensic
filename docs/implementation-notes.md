@@ -276,8 +276,11 @@ separator.  The format is purely numeric.
 `v11_hello.dar`: standard `seqt_catalogue` escape; used for offset arithmetic
 verification.
 
-`userdata.1.dar`: no `seqt_catalogue` escape; catalog located via archive
-label scan; timestamps use `0x40` infinint encoding; `cmd_line` field = "N/A".
+`userdata.1.dar`: standard DAR written with sequential tape marks **disabled**
+(equivalent to `dar -at`), so the `seqt_catalogue` escape is absent and the
+catalog is located by its `ref_data_name` label (= the slice label); timestamps
+use the `0x40` infinint encoding; `cmd_line` = "N/A". This is **not** a vendor
+format variant — official dar reads such archives via the terminateur trailer.
 
 Both archives share DAR magic `0x0000007b` and the same cat_sig encoding.
 

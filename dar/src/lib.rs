@@ -134,8 +134,8 @@ impl<R: Read + Seek> DarReader<R> {
             let format_value = read_format_value(&mut reader);
             reader.seek(SeekFrom::Start(archive_origin))?;
 
-            // true → standard escape found (catalog has label + maybe path);
-            // false → located via the archive label directly (Passware: no prefix).
+            // true → seqt_catalogue tape mark found (catalog has label + maybe path);
+            // false → located by its ref_data_name label (tape marks off, e.g. Passware).
             let via_escape = find_catalogue(&mut reader, &label)?;
             if via_escape {
                 skip(&mut reader, 10)?; // catalog label
@@ -302,11 +302,16 @@ fn scan_window<R: Read + Seek>(
 
 /// Locate the catalog section and position the reader at its first entry.
 ///
-/// Returns `true` when the standard `seqt_catalogue` escape is found — the
-/// caller must then skip the 10-byte in-catalog label and path NUL string.
+/// Returns `true` when the `seqt_catalogue` escape is found — the caller then
+/// skips the 10-byte in-catalog label and (format 11.1+) the path NUL string.
+/// The escape is a *sequential-read tape mark*; it is present only when the
+/// archive was written with tape marks (libdar's default).
 ///
-/// Returns `false` when the catalog is located via the archive `label` directly
-/// (Passware Mobile format: no escape, no path NUL between label and entries).
+/// Returns `false` when the catalog is located by its `ref_data_name` label
+/// directly. Archives written with tape marks disabled (e.g. by Passware Kit
+/// Mobile, equivalent to `dar -at`) omit the escape; their catalog still begins
+/// with the 10-byte `ref_data_name`, which equals the slice `label`, so scanning
+/// for `label` in the tail finds it — a structural marker, not a heuristic.
 ///
 /// Returns `Err(Corrupt)` when neither marker is found.
 ///

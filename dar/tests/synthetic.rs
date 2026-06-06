@@ -4,7 +4,7 @@
 //! specific code path that real archive fixtures cannot reach.  No on-disk
 //! files are required.
 
-use dar::{DarError, DarReader};
+use dar_forensic::{DarError, DarReader};
 use std::io::Cursor;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -281,10 +281,10 @@ fn catalog_invalid_utf8_filename_returns_corrupt() {
 
 // ── catalog: label-only marker (no seqt_catalogue escape) ─────────────────────
 
-/// A DAR archive whose catalog begins with the 10-byte archive label and has no
-/// seqt_catalogue escape sequence.  The parser must fall back to a label scan.
-///
-/// This is the format produced by Passware Mobile.
+/// A DAR archive written with tape marks disabled (`dar -at`, as Passware Kit
+/// Mobile does): no `seqt_catalogue` escape, so the catalog is located by its
+/// `ref_data_name` label (= the slice label) instead. Standard DAR, not a
+/// variant — the escape is an optional sequential-read tape mark.
 #[test]
 fn catalog_without_escape_lists_entries() {
     const LABEL: [u8; 10] = [0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A];

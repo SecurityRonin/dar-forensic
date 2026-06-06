@@ -17,4 +17,4 @@ doc = false
 
 [dependencies]
 libfuzzer-sys = "0.4"
-dar = { path = "../dar", default-features = false }
+dar-forensic = { path = "../dar", default-features = false }

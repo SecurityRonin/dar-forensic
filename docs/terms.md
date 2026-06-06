@@ -1,14 +1,14 @@
 # Terms of Service
 
 **Effective date:** 2026-06-03  
-**Product:** dar (Rust library)  
+**Product:** dar-forensic (Rust library)  
 **Operator:** Security Ronin Ltd
 
 ---
 
 ## Licence
 
-dar is released under the [MIT Licence](https://github.com/SecurityRonin/dar/blob/main/LICENSE). You are free to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the software, subject to the licence terms.
+dar is released under the [MIT Licence](https://github.com/SecurityRonin/dar-forensic/blob/main/LICENSE). You are free to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the software, subject to the licence terms.
 
 ---
 

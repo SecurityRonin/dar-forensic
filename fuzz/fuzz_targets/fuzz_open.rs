@@ -1,6 +1,6 @@
 #![no_main]
 
-use dar::DarReader;
+use dar_forensic::DarReader;
 use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;
 

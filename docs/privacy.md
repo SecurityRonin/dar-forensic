@@ -1,7 +1,7 @@
 # Privacy Policy
 
 **Effective date:** 2026-06-03  
-**Product:** dar (Rust library)  
+**Product:** dar-forensic (Rust library)  
 **Operator:** Security Ronin Ltd
 
 ---
@@ -28,7 +28,7 @@ dar has no telemetry, no crash reporting, no analytics, and no update checks. It
 
 ## Open source
 
-dar is fully open source under the MIT licence. You can audit every line — including the fact that there are no network calls — at [github.com/SecurityRonin/dar](https://github.com/SecurityRonin/dar).
+dar is fully open source under the MIT licence. You can audit every line — including the fact that there are no network calls — at [github.com/SecurityRonin/dar-forensic](https://github.com/SecurityRonin/dar-forensic).
 
 ---
 

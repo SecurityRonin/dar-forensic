@@ -1,15 +1,15 @@
 [package]
-name        = "dar"
+name        = "dar-forensic"
 version     = "0.1.0"
 edition     = "2021"
 rust-version = "1.85"
-description = "Pure-Rust DAR (Disk ARchiver) archive reader"
+description = "Forensic-grade reader for Denis Corbin DAR (Disk ARchiver) archives, including the Passware Kit Mobile variant; hardened and fuzz-tested against malicious input."
 license     = "MIT"
-repository  = "https://github.com/SecurityRonin/dar"
-homepage    = "https://github.com/SecurityRonin/dar"
-documentation = "https://docs.rs/dar"
+repository  = "https://github.com/SecurityRonin/dar-forensic"
+homepage    = "https://github.com/SecurityRonin/dar-forensic"
+documentation = "https://docs.rs/dar-forensic"
 authors     = ["Albert Hui"]
-keywords    = ["forensics", "dar", "archive", "backup"]
+keywords    = ["forensics", "dar", "archive", "passware", "backup"]
 categories  = ["parser-implementations"]
 
 [dependencies]
