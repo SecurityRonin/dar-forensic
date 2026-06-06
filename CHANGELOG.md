@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-06-06
+
+### Added
+
+- **DAR format edition 1 (dar 1.0.x, 2002).** Reverse-engineered from a real
+  edition-1 archive and implemented: the flagless inode (no EA flag byte, no
+  ctime, no FSA), the `size·offset`-only `cat_file` (no `storage_size`, no CRC;
+  `storage_size` synthesised), and the `"root"`-named root. Validated
+  byte-for-byte against a real dar-1.0.0 archive.
+- **Compressed pre-8 archives now list and extract.** Formats ≤ 7 carry no
+  per-entry compression byte, so the archive-global codec governs both the
+  terminateur-located catalogue and every entry. The pre-8 path now inflates a
+  compressed catalogue (previously any compressed pre-8 archive silently listed
+  zero entries), and `cat_file` parsing is format-aware across editions 1 / 2–7
+  / 8+. A compressed format-1 entry (which has no `storage_size`) is decoded by
+  streaming the codec to its natural end.
+- **Named-pipe (`p`) and socket (`s`) inodes are skipped** rather than stopping
+  the catalogue walk — real full-filesystem archives contain them (all formats).
+- A second CI gate holds the public-API (`tests/`) suite to 100% line coverage,
+  alongside the existing combined-coverage gate.
+
 ## [0.2.0] — 2026-06-06
 
 ### Added
@@ -46,5 +67,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Hardened against malicious input (no panic / OOM / backward seek), continuous
   `cargo fuzz`, and 100% CI-enforced line coverage.
 
+[0.3.0]: https://github.com/SecurityRonin/dar-forensic/releases/tag/v0.3.0
 [0.2.0]: https://github.com/SecurityRonin/dar-forensic/releases/tag/v0.2.0
 [0.1.0]: https://github.com/SecurityRonin/dar-forensic/releases/tag/v0.1.0

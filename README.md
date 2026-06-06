@@ -12,7 +12,7 @@ Pure-Rust reader for Denis Corbin **DAR (Disk ARchiver)** archives — the forma
 
 ```toml
 [dependencies]
-dar-forensic = "0.2"
+dar-forensic = "0.3"
 ```
 
 ## Quick start
@@ -41,7 +41,7 @@ DAR is a C++ format; the reference implementation (`libdar`) is GPL with C bindi
 | | libdar (C++) | `dar-forensic` |
 |---|---|---|
 | Language / linkage | C++, GPL, C FFI | pure Rust, MIT, `unsafe_code = "deny"` |
-| Reads DAR formats 7–11 | ✅ | ✅ (all validated against real fixtures) |
+| Reads DAR formats 1–11 | ✅ | ✅ (1 + 7–11 validated against real archives) |
 | Tape-marks-disabled archives (Passware / mobile) | ✅ | ✅ |
 | Random-access extraction (`Read + Seek`) | ✅ | ✅ — composes with `ewf`, `vmdk`, … |
 | Transparent gzip / bzip2 / xz decompression | ✅ | ✅ — pure-Rust decoders, no C |
@@ -68,7 +68,7 @@ Archives written by Passware Kit Mobile have no `seqt_catalogue` escape, which o
 | Tape marks on **or** off | — | both supported (e.g. Passware writes them off) |
 | Archive creation / writing | — | Not supported (reader only) |
 
-The format version is the header `version_string`, each byte `value + 48` (`"090"` → 9, `"0:1"` → 10.1). Formats ≤ 7 are structurally different — no `seqt_catalogue` escape (catalog located via the end *terminateur* trailer), `u16` uid/gid, bare-seconds timestamps, fixed 2-byte CRC. The full per-version layout, reverse-documented from the authoritative libdar source, is in [docs/implementation-notes.md](docs/implementation-notes.md) §11–§12.
+The format version is the header `version_string`, each byte `value + 48` (`"090"` → 9, `"0:1"` → 10.1). Formats ≤ 7 are structurally different — no `seqt_catalogue` escape (catalog located via the end *terminateur* trailer), `u16` uid/gid, bare-seconds timestamps, and a fixed 2-byte CRC; format 1 goes further still — no inode flag byte, and a `size·offset`-only file record with no CRC. Compressed pre-8 archives carry no per-entry codec byte, so the archive-global codec drives both the catalog and every entry. The full per-version layout, reverse-documented from the authoritative libdar source, is in [docs/implementation-notes.md](docs/implementation-notes.md) §11–§12.
 
 ### Scope and limits
 
@@ -96,7 +96,7 @@ cargo +nightly fuzz run fuzz_open
 
 ## Testing
 
-103 tests — unit (private helpers + every error branch), synthetic-archive integration, and real-fixture integration (including real gzip/bzip2/xz `dar -z` archives) — at **100% library line coverage, enforced in CI** (`cargo llvm-cov`, lcov gate). One public fixture per format (`v7`–`v11`, built with the matching dar release, committed and reproducible) runs in CI; parsing was additionally confirmed against a confidential 92 GiB Passware Kit Mobile archive (DAR format 9, 637,698 entries — not committed). The parser survives millions of `cargo fuzz` executions with zero crashes.
+117 tests — unit (private helpers + every error branch), synthetic-archive integration, and real-fixture integration — at **100% library line coverage, enforced in CI** (`cargo llvm-cov`, lcov gate), with a second gate that holds the public-API (`tests/`) suite to the same bar. Committed, reproducible fixtures cover formats 7–11 (one per dar release) and the three gzip/bzip2/xz `dar -z` codecs; parsing was additionally validated byte-for-byte against a real dar-1.0.0 edition-1 archive, and against a confidential 92 GiB Passware Kit Mobile archive (DAR format 9, 637,698 entries — not committed). The parser survives millions of `cargo fuzz` executions with zero crashes.
 
 ```bash
 cargo test
