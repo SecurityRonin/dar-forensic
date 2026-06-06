@@ -121,13 +121,16 @@ impl AnomalyKind {
     #[must_use]
     pub fn severity(&self) -> Severity {
         match self {
+            // A truncated catalogue means entries may be missing entirely.
             AnomalyKind::IncompleteCatalog { .. } => Severity::High,
-            AnomalyKind::UnsupportedCodec { .. } => Severity::Medium,
-            AnomalyKind::AbsolutePath { .. } => Severity::Medium,
-            AnomalyKind::ParentTraversal { .. } => Severity::Medium,
-            AnomalyKind::DuplicatePath { .. } => Severity::Low,
-            AnomalyKind::FutureTimestamp { .. } => Severity::Low,
-            AnomalyKind::ControlCharsInName { .. } => Severity::Low,
+            // Unextractable data / extraction-safety irregularities.
+            AnomalyKind::UnsupportedCodec { .. }
+            | AnomalyKind::AbsolutePath { .. }
+            | AnomalyKind::ParentTraversal { .. } => Severity::Medium,
+            // Listing irregularities with common benign explanations.
+            AnomalyKind::DuplicatePath { .. }
+            | AnomalyKind::FutureTimestamp { .. }
+            | AnomalyKind::ControlCharsInName { .. } => Severity::Low,
         }
     }
 

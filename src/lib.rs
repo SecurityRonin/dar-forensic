@@ -61,6 +61,11 @@ const DAR_MAGIC: [u8; 4] = [0x00, 0x00, 0x00, 0x7b];
 const MAX_CATALOGUE_COMPRESSED: u64 = 512 * 1024 * 1024;
 const MAX_CATALOGUE_INFLATED: u64 = 1024 * 1024 * 1024;
 
+/// Epoch seconds for 2100-01-01T00:00:00Z. [`DarReader::audit`] flags entry
+/// timestamps beyond this as implausibly far in the future (clock error or
+/// tampering) — a deterministic ceiling, not a comparison against wall-clock.
+const FAR_FUTURE_EPOCH_SECS: i64 = 4_102_444_800;
+
 /// Escape sequence marking the catalog: `AD FD EA 77 21 43`.
 const SEQT_CATALOGUE: [u8; 6] = [0xAD, 0xFD, 0xEA, 0x77, 0x21, 0x43];
 
@@ -332,7 +337,61 @@ impl<R: Read + Seek> DarReader<R> {
     /// what is detected; each [`Anomaly`] is an observation, not a conclusion.
     #[must_use]
     pub fn audit(&self) -> Vec<Anomaly> {
-        Vec::new()
+        let mut anomalies = Vec::new();
+
+        if !self.complete {
+            anomalies.push(Anomaly::new(AnomalyKind::IncompleteCatalog {
+                entries_recovered: self.entries.len(),
+            }));
+        }
+
+        let mut seen: std::collections::HashSet<&[u8]> = std::collections::HashSet::new();
+        let mut dup_seen: std::collections::HashSet<&[u8]> = std::collections::HashSet::new();
+        for e in &self.entries {
+            let path = String::from_utf8_lossy(&e.path).into_owned();
+
+            if let Some(codec) = unsupported_codec(e.compression) {
+                anomalies.push(Anomaly::new(AnomalyKind::UnsupportedCodec {
+                    path: path.clone(),
+                    codec,
+                }));
+            }
+            if e.path.first() == Some(&b'/') {
+                anomalies.push(Anomaly::new(AnomalyKind::AbsolutePath {
+                    path: path.clone(),
+                }));
+            }
+            if e.path.split(|&b| b == b'/').any(|c| c == b"..") {
+                anomalies.push(Anomaly::new(AnomalyKind::ParentTraversal {
+                    path: path.clone(),
+                }));
+            }
+            if e.path.iter().any(|&b| b < 0x20 || b == 0x7f) {
+                anomalies.push(Anomaly::new(AnomalyKind::ControlCharsInName {
+                    path: path.clone(),
+                }));
+            }
+            for (field, t) in [("atime", e.atime), ("mtime", e.mtime)]
+                .into_iter()
+                .chain(e.ctime.map(|c| ("ctime", c)))
+            {
+                if t > FAR_FUTURE_EPOCH_SECS {
+                    anomalies.push(Anomaly::new(AnomalyKind::FutureTimestamp {
+                        path: path.clone(),
+                        field,
+                        epoch_secs: t,
+                    }));
+                }
+            }
+            // Report a duplicated path once, on its second sighting.
+            if !seen.insert(e.path.as_slice()) && dup_seen.insert(e.path.as_slice()) {
+                anomalies.push(Anomaly::new(AnomalyKind::DuplicatePath { path }));
+            }
+        }
+
+        // Most-severe first; stable, so equal severities keep catalogue order.
+        anomalies.sort_by(|a, b| b.severity.cmp(&a.severity));
+        anomalies
     }
 
     /// Extract a file by path, streaming its (decompressed) bytes to `out` and
@@ -579,6 +638,14 @@ fn is_compressed(algo: u8) -> bool {
         algo.to_ascii_lowercase(),
         b'z' | b'y' | b'x' | b'l' | b'j' | b'k' | b'd' | b'q'
     )
+}
+
+/// The codec character if `algo` names a compression this reader recognises but
+/// cannot decode — lzo (`l`/`j`/`k`), zstd (`d`), or lz4 (`q`). Returns `None`
+/// for the decodable codecs (`z`/`y`/`x`) and for stored entries. The original
+/// case is preserved (uppercase = per-block) as evidence.
+fn unsupported_codec(algo: u8) -> Option<char> {
+    matches!(algo.to_ascii_lowercase(), b'l' | b'j' | b'k' | b'd' | b'q').then_some(algo as char)
 }
 
 /// Inflate a compressed catalogue into a single buffer, routing through the same
