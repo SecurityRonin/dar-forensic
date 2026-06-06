@@ -776,3 +776,171 @@ fn symlink_with_fsa_block_is_skipped() {
     let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
     assert_eq!(paths, ["after.txt"]);
 }
+
+// ── e2e coverage of helper guards through the public API ──────────────────────
+//
+// These feed crafted malicious archives to open()/extract() so the deep
+// defensive guards in the parsing helpers fire end-to-end (not only via the
+// lib.rs unit tests). A handful of guards are unreachable through the public API
+// and remain covered by the unit suite only: the >256 MiB tail-scan fallback,
+// BoundedWriter::flush (lzma-rs never flushes the writer), and the all-0xFF
+// terminator underflow (the DAR magic forbids an all-0xFF file).
+
+/// `DarReader` is intentionally not `Debug`, so `.unwrap_err()` won't compile on
+/// `open()`; this returns the error or panics on an unexpected `Ok`.
+fn open_err(buf: Vec<u8>) -> DarError {
+    match DarReader::open(Cursor::new(buf)) {
+        Err(e) => e,
+        Ok(_) => panic!("expected Err, got Ok"),
+    }
+}
+
+#[test]
+fn e2e_archive_with_no_body_is_too_short() {
+    // header() ends exactly at archive_origin → find_catalogue: body too short.
+    let err = open_err(header());
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("too short")));
+}
+
+/// header + escape + ROOT + a file entry whose `size` infinint is `size_bytes`.
+fn dar_with_first_file_size(size_bytes: &[u8]) -> Vec<u8> {
+    let mut buf = header();
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    let mut e = vec![0x06u8]; // 'f'
+    e.extend_from_slice(b"f\x00");
+    e.extend(inode_base(false));
+    e.extend_from_slice(size_bytes); // read by read_infinint
+    buf.extend(e);
+    buf.push(EOD);
+    buf
+}
+
+#[test]
+fn e2e_infinint_skip_byte_size_returns_corrupt() {
+    // size infinint leads with 0x00 (a >36-byte skip group) → rejected.
+    let err = open_err(dar_with_first_file_size(&[0x00]));
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("multi-group")));
+}
+
+#[test]
+fn e2e_infinint_wide_terminal_size_returns_corrupt() {
+    // terminal 0x20 → (2+1)*4 = 12 data bytes, beyond u64.
+    let err = open_err(dar_with_first_file_size(&[0x20]));
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("exceeds 64-bit")));
+}
+
+#[test]
+fn e2e_filename_without_nul_is_length_capped() {
+    let mut buf = header();
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    buf.push(0x06u8); // 'f'
+    buf.extend(std::iter::repeat_n(b'A', 64 * 1024 + 8)); // name, no NUL
+    let err = open_err(buf);
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("exceeds")));
+}
+
+#[test]
+fn e2e_inplace_path_without_nul_is_length_capped() {
+    // format 11.1 → open() skips the in-place path after the catalog label.
+    let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b];
+    buf.extend_from_slice(&[0u8; 10]); // label (all-zero → located via escape)
+    buf.extend_from_slice(&[0x00, b'T']);
+    buf.extend_from_slice(&inf(0)); // archive_origin
+    buf.extend_from_slice(b"0;1\x00"); // version 11.1
+    buf.push(b'n'); // stored → plaintext catalogue
+    buf.extend_from_slice(&[0xAD, 0xFD, 0xEA, 0x77, 0x21, 0x43]); // seqt_catalogue
+    buf.extend_from_slice(&[0u8; 10]); // in-catalog label
+    buf.extend(std::iter::repeat_n(b'P', 64 * 1024 + 8)); // path, no NUL
+    let err = open_err(buf);
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("exceeds")));
+}
+
+/// A format-11.3 archive with a stored ('n') catalogue (so it lists) holding one
+/// entry whose data is the caller's `blob`, compressed with `comp`, declaring
+/// `declared_size` uncompressed bytes.
+fn dar_with_compressed_entry(comp: u8, blob: &[u8], declared_size: u32) -> Vec<u8> {
+    let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b];
+    buf.extend_from_slice(&[0u8; 10]); // label
+    buf.extend_from_slice(&[0x00, b'T']);
+    buf.extend_from_slice(&inf(0)); // archive_origin = 21
+    buf.extend_from_slice(b"0;3\x00"); // version 11.3
+    buf.push(b'n'); // GLOBAL compression stored → plaintext catalogue
+    let data_off = (buf.len() - 21) as u32; // blob offset from archive_origin
+    buf.extend_from_slice(blob);
+    buf.extend_from_slice(&[0xAD, 0xFD, 0xEA, 0x77, 0x21, 0x43]); // seqt_catalogue
+    buf.extend_from_slice(&[0u8; 10]); // in-catalog label
+    buf.push(0x00); // in-place path NUL (format 11.1+)
+    buf.extend(root_dir());
+    let mut e = vec![0x06u8]; // 'f'
+    e.extend_from_slice(b"c\x00");
+    e.extend(inode_base(false));
+    e.extend_from_slice(&inf(declared_size)); // size
+    e.extend_from_slice(&inf(data_off)); // archive_offset
+    e.extend_from_slice(&inf(blob.len() as u32)); // stored_size
+    e.push(0x00); // not encrypted
+    e.push(comp); // per-file codec
+    e.extend_from_slice(&inf(0)); // crc_size
+    buf.extend(e);
+    buf.push(EOD);
+    buf
+}
+
+#[test]
+fn e2e_gzip_entry_exceeding_declared_size_is_rejected() {
+    use flate2::{write::ZlibEncoder, Compression};
+    use std::io::Write;
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(&[b'X'; 100]).unwrap();
+    let blob = enc.finish().unwrap(); // inflates to 100, declared 5
+    let dar = dar_with_compressed_entry(b'z', &blob, 5);
+    let mut r = DarReader::open(Cursor::new(dar)).expect("open");
+    let err = r.extract("c").unwrap_err();
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("exceeds bound")));
+}
+
+#[test]
+fn e2e_xz_entry_exceeding_declared_size_is_rejected() {
+    // Real xz stream of 200 'A' bytes; declared size 5 → BoundedWriter overflow.
+    const XZ_200A: [u8; 72] = [
+        0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0x00, 0x04, 0xe6, 0xd6, 0xb4, 0x46, 0x02, 0x00, 0x21,
+        0x01, 0x16, 0x00, 0x00, 0x00, 0x74, 0x2f, 0xe5, 0xa3, 0xe0, 0x00, 0xc7, 0x00, 0x06, 0x5d,
+        0x00, 0x20, 0xef, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xd5, 0xfd, 0x97, 0x6e, 0x23,
+        0x68, 0x20, 0xa1, 0x00, 0x01, 0x22, 0xc8, 0x01, 0x00, 0x00, 0x00, 0x9f, 0xb4, 0xe8, 0xe8,
+        0xb1, 0xc4, 0x67, 0xfb, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x59, 0x5a,
+    ];
+    let dar = dar_with_compressed_entry(b'x', &XZ_200A, 5);
+    let mut r = DarReader::open(Cursor::new(dar)).expect("open");
+    let err = r.extract("c").unwrap_err();
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("xz decode failed")));
+}
+
+/// A legacy ('N' extension, format 7) header followed by `tail`, whose end is
+/// scanned by read_terminateur.
+fn legacy_with_terminator_tail(tail: &[u8]) -> Vec<u8> {
+    let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b];
+    buf.extend_from_slice(&[0u8; 10]); // label
+    buf.push(0x00); // flag
+    buf.push(b'N'); // extension = none (legacy)
+    buf.extend_from_slice(b"07\x00"); // archive_version (format 7)
+    buf.extend_from_slice(tail);
+    buf
+}
+
+#[test]
+fn e2e_legacy_terminator_padding_too_long_returns_corrupt() {
+    // 513 trailing 0xFF bytes → >4096 padding bits before any terminator byte.
+    let dar = legacy_with_terminator_tail(&[0xFFu8; 513]);
+    let err = open_err(dar);
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("padding too long")));
+}
+
+#[test]
+fn e2e_legacy_terminator_malformed_bit_run_returns_corrupt() {
+    // Terminal byte 0xA0 = 1010_0000: top bit set but the set MSBs aren't
+    // contiguous → "malformed terminator bit run".
+    let dar = legacy_with_terminator_tail(&[0xA0]);
+    let err = open_err(dar);
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("malformed terminator")));
+}

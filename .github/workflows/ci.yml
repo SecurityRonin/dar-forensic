@@ -119,6 +119,31 @@ jobs:
             exit 1
           fi
           echo "100% line coverage ✓"
+      # The e2e suite (tests/, exercising only the public API) must independently
+      # cover every library line reachable through open()/extract(). A small,
+      # documented set of guards is unreachable through the public API and is
+      # covered by the unit suite instead. This gate fails if any OTHER line is
+      # left uncovered by the e2e suite — i.e. public-API-reachable code was added
+      # without an e2e test. Content-matched, so it is robust to line shifts.
+      - name: Enforce e2e (public-API) coverage
+        run: |
+          cargo llvm-cov --test synthetic --test real_images --lcov --output-path e2e.info
+          fail=0
+          for ln in $(grep -E '^DA:[0-9]+,0$' e2e.info | sed 's/DA://;s/,0//'); do
+            txt=$(sed -n "${ln}p" src/lib.rs | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            case "$txt" in
+              "}") ;;                                                            # bare brace — never real missed logic
+              "r.seek(SeekFrom::Start(archive_origin))?;") ;;                    # >256 MiB tail-scan fallback
+              "if let Some(result) = scan_window(r, label, use_label)? {") ;;    # >256 MiB tail-scan fallback
+              "return Ok(result);") ;;                                           # >256 MiB tail-scan fallback
+              "fn flush(&mut self) -> std::io::Result<()> {") ;;                 # BoundedWriter::flush — lzma-rs never flushes
+              "Ok(())") ;;                                                       # BoundedWriter::flush body
+              'return Err(DarError::Corrupt("terminator underflows archive".into()));') ;; # all-0xFF file forbidden by magic
+              *) echo "::error::e2e leaves a public-API-reachable line uncovered: src/lib.rs:${ln}: ${txt}"; fail=1 ;;
+            esac
+          done
+          [ "$fail" = 0 ] && echo "e2e suite covers all public-API-reachable lines ✓ (only documented unit-only guards remain)"
+          exit $fail
 
   geiger:
     name: Unsafe Audit (cargo-geiger)
