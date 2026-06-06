@@ -360,3 +360,42 @@ fn gzip_extracts_stored_small_file() {
     let data = r.extract("small.txt").expect("extract stored small.txt");
     assert_eq!(data, b"tiny\n");
 }
+
+/// Full round-trip for a compressed fixture: list both entries, then extract the
+/// compressed payload and the stored small file.
+fn assert_compressed_fixture(name: &str) {
+    let r = open_fixture(name);
+    let entries = r.entries();
+    assert_eq!(entries.len(), 2, "{name} must list both files");
+    assert_eq!(
+        entries
+            .iter()
+            .find(|e| e.path == "payload.txt")
+            .expect("payload.txt present")
+            .size,
+        136_000
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .find(|e| e.path == "small.txt")
+            .expect("small.txt present")
+            .size,
+        5
+    );
+
+    let mut r = open_fixture(name);
+    assert_eq!(
+        r.extract("payload.txt").expect("extract compressed payload"),
+        expected_payload()
+    );
+    assert_eq!(
+        r.extract("small.txt").expect("extract stored small"),
+        b"tiny\n"
+    );
+}
+
+#[test]
+fn bzip2_lists_and_extracts() {
+    assert_compressed_fixture("v11_bzip2.dar");
+}
