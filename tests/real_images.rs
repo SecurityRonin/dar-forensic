@@ -294,3 +294,67 @@ fn extract_missing_path_returns_err() {
         "extracting non-existent path must return Err"
     );
 }
+
+// ── compressed fixtures ──────────────────────────────────────────────────────
+//
+// All three are DAR format 11.3 archives built with dar 2.8.5 on macOS, each
+// holding the same two files compressed with a different codec:
+//
+//   yes 'dar-forensic gzip bzip2 xz roundtrip corpus line padding 0123456789' \
+//       | head -2000 > corpus/payload.txt      # 2000 * 68 = 136000 bytes
+//   printf 'tiny\n' > corpus/small.txt
+//   dar -c arch_<algo> -R corpus -z<algo> -g payload.txt -g small.txt
+//
+//   v11_gzip.dar   dar … -zgzip    (per-file compression char 'z')
+//   v11_bzip2.dar  dar … -zbzip2   (char 'y')
+//   v11_xz.dar     dar … -zxz      (char 'x')
+//
+// payload.txt (136000 bytes, 99% compressible) is stored compressed; small.txt
+// (5 bytes) is too small to benefit and is stored uncompressed.
+
+const PAYLOAD_LINE: &str = "dar-forensic gzip bzip2 xz roundtrip corpus line padding 0123456789\n";
+
+fn expected_payload() -> Vec<u8> {
+    PAYLOAD_LINE.repeat(2000).into_bytes()
+}
+
+fn open_fixture(name: &str) -> DarReader<Cursor<Vec<u8>>> {
+    let path = format!("{DATA_DIR}/{name}");
+    let data = std::fs::read(Path::new(&path)).unwrap_or_else(|e| panic!("read {name}: {e}"));
+    DarReader::open(Cursor::new(data)).unwrap_or_else(|e| panic!("DarReader::open {name}: {e}"))
+}
+
+// The catalogue of a -z archive is itself compressed with the archive codec, so
+// listing requires decompressing it; extraction additionally decompresses each
+// entry's own stream (small.txt stays stored, so it exercises the 'n' path too).
+
+#[test]
+fn gzip_lists_both_entries() {
+    let r = open_fixture("v11_gzip.dar");
+    let entries = r.entries();
+    assert_eq!(entries.len(), 2, "gzip archive must list both files");
+    let payload = entries
+        .iter()
+        .find(|e| e.path == "payload.txt")
+        .expect("payload.txt present");
+    assert_eq!(payload.size, 136_000);
+    let small = entries
+        .iter()
+        .find(|e| e.path == "small.txt")
+        .expect("small.txt present");
+    assert_eq!(small.size, 5);
+}
+
+#[test]
+fn gzip_extracts_payload_roundtrip() {
+    let mut r = open_fixture("v11_gzip.dar");
+    let data = r.extract("payload.txt").expect("extract gzip-compressed payload.txt");
+    assert_eq!(data, expected_payload());
+}
+
+#[test]
+fn gzip_extracts_stored_small_file() {
+    let mut r = open_fixture("v11_gzip.dar");
+    let data = r.extract("small.txt").expect("extract stored small.txt");
+    assert_eq!(data, b"tiny\n");
+}
