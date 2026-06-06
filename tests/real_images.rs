@@ -501,7 +501,7 @@ fn extract_to_streams_decompressed() {
 
 #[test]
 fn write_bodyfile_emits_one_well_formed_line_per_entry() {
-    let mut r = open_v11();
+    let r = open_v11();
     let entry_count = r.entries().len();
     let mut out = Vec::new();
     r.write_bodyfile(&mut out).expect("write_bodyfile");

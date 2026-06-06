@@ -49,6 +49,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
 use thiserror::Error;
 
+mod bodyfile;
 mod findings;
 pub use findings::{Anomaly, AnomalyKind, Severity};
 
@@ -140,7 +141,7 @@ impl DarEntry {
         String::from_utf8_lossy(&self.path)
     }
 
-    /// One Sleuth Kit ["bodyfile"](https://wiki.sleuthkit.org/index.php?title=Body_file)
+    /// One Sleuth Kit [`bodyfile`](https://wiki.sleuthkit.org/index.php?title=Body_file)
     /// line for this entry (no trailing newline) — the input format for TSK's
     /// `mactime` timeline tool.
     ///
@@ -151,7 +152,7 @@ impl DarEntry {
     /// bytes in names are backslash-escaped so one entry stays one line.
     #[must_use]
     pub fn bodyfile(&self) -> String {
-        String::new()
+        bodyfile::line(self)
     }
 }
 
@@ -412,7 +413,9 @@ impl<R: Read + Seek> DarReader<R> {
     /// entry, newline-terminated — to `out`, for feeding TSK's `mactime` timeline
     /// tool. Pure metadata over the parsed catalogue; no archive data is read.
     pub fn write_bodyfile<W: Write>(&self, out: &mut W) -> std::io::Result<()> {
-        let _ = out;
+        for entry in self.entries() {
+            writeln!(out, "{}", entry.bodyfile())?;
+        }
         Ok(())
     }
 
