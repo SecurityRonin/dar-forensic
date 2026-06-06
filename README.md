@@ -58,7 +58,7 @@ Archives written by Passware Kit Mobile have no `seqt_catalogue` escape, which o
 
 | DAR format | `version_string` | Status |
 |------------|------------------|--------|
-| Format 11 (dar 2.7–2.8) | e.g. `"0;3"` (11.3) | Supported — validated against a dar 2.8.5 fixture |
+| Format 11 (dar 2.7–2.8) | `"0;3"` (11.3) | Supported — validated against a dar 2.8.5 fixture |
 | Format 10 (dar 2.6) | `"0:1"` | Supported — validated against a dar 2.6.16 fixture |
 | Format 9 (dar 2.5) | `"090"` | Supported — validated against a dar 2.5.3 fixture **and a real 92 GiB Passware archive** |
 | Format 8 (dar 2.4) | `"081"` | Supported — validated against a dar 2.4.24 fixture |
