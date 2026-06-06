@@ -23,9 +23,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stable `code`, a `Severity`, and a human-readable note framed as an
   observation ("consistent with …"), not a conclusion. Mirrors the sibling
   forensic crates' findings vocabulary.
-- **Optional `serde` feature** derives `Serialize` on the `audit()` finding
-  types (`Severity`, `AnomalyKind`, `Anomaly`) for JSON/structured export. Off
-  by default — the core reader keeps zero serialization dependencies.
+- **Optional `serde` feature** derives `Serialize` on the entry types
+  (`DarEntry`, `EntryKind`) and the `audit()` finding types (`Severity`,
+  `AnomalyKind`, `Anomaly`) for JSON/structured export. Off by default — the
+  core reader keeps zero serialization dependencies. In JSON, an entry's `path`
+  and `symlink_target` are the lossy-UTF-8 display string (the byte-exact values
+  remain on the typed fields).
 - **`DarReader::extract_to<W: Write>(path, &mut out)`** streams an entry's
   (decompressed) bytes straight to any writer without buffering the whole file,
   returning the byte count; safe for multi-GiB entries. `extract()` now
