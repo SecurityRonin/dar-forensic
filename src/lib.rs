@@ -90,6 +90,7 @@ pub enum DarError {
 
 /// The kind of filesystem object a catalog entry describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum EntryKind {
     File,
     Directory,
@@ -110,6 +111,7 @@ pub enum EntryKind {
 /// must never lose or reject a byte-exact name. Use [`DarEntry::path_lossy`] for
 /// display.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct DarEntry {
     /// Path as stored, raw bytes — may not be valid UTF-8.
     pub path: Vec<u8>,

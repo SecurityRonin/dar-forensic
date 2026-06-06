@@ -1530,3 +1530,53 @@ fn bodyfile_appends_symlink_target() {
     assert!(line.contains("|link -> /etc/passwd|"), "{line}");
     assert!(line.split('|').nth(3).unwrap().starts_with("l/l"), "{line}");
 }
+
+// ── entry JSON export (feature = "serde") ─────────────────────────────────────
+
+#[cfg(feature = "serde")]
+#[test]
+fn entry_serializes_to_json_with_string_path() {
+    let e = DarEntry {
+        path: b"files/hello.txt".to_vec(),
+        kind: EntryKind::File,
+        size: 13,
+        uid: 1000,
+        gid: 1000,
+        mode: 0o644,
+        atime: 100,
+        mtime: 200,
+        ctime: Some(300),
+        symlink_target: None,
+    };
+    let json = serde_json::to_string(&e).expect("serialize");
+    // path is a readable string, not a raw byte array.
+    assert!(json.contains("\"path\":\"files/hello.txt\""), "{json}");
+    assert!(json.contains("\"kind\":\"File\""), "{json}");
+    assert!(json.contains("\"size\":13"), "{json}");
+    assert!(json.contains("\"ctime\":300"), "{json}");
+    assert!(json.contains("\"symlink_target\":null"), "{json}");
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn entry_serializes_symlink_target_as_string() {
+    let e = DarEntry {
+        path: b"link".to_vec(),
+        kind: EntryKind::Symlink,
+        size: 0,
+        uid: 0,
+        gid: 0,
+        mode: 0o777,
+        atime: 0,
+        mtime: 0,
+        ctime: None,
+        symlink_target: Some(b"/etc/passwd".to_vec()),
+    };
+    let json = serde_json::to_string(&e).expect("serialize");
+    assert!(
+        json.contains("\"symlink_target\":\"/etc/passwd\""),
+        "{json}"
+    );
+    assert!(json.contains("\"kind\":\"Symlink\""), "{json}");
+    assert!(json.contains("\"ctime\":null"), "{json}");
+}
