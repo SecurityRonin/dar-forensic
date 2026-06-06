@@ -1683,3 +1683,45 @@ fn verify_unknown_path_errors() {
     let mut r = DarReader::open(Cursor::new(dar)).expect("open");
     assert!(matches!(r.verify("nope"), Err(DarError::EntryNotFound(_))));
 }
+
+#[test]
+fn oversized_crc_width_is_rejected() {
+    // A hostile catalogue declaring a 70_000-byte CRC width must be rejected
+    // (allocation-bomb guard), not allocated.
+    let mut buf = header();
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    let mut entry = vec![0x06u8]; // cat_sig → 'f'
+    entry.extend_from_slice(b"big.crc");
+    entry.push(0x00);
+    entry.extend(inode_base(false));
+    entry.extend_from_slice(&inf(0)); // size
+    entry.extend_from_slice(&inf(0)); // archive_offset
+    entry.extend_from_slice(&inf(0)); // stored_size
+    entry.push(0x00); // enc = none
+    entry.push(b'n'); // comp = none
+    entry.extend_from_slice(&inf(70_000)); // CRC width > MAX_CRC_SIZE (64 KiB)
+    buf.extend(entry);
+    buf.push(EOD);
+    let Err(err) = DarReader::open(Cursor::new(buf)) else {
+        panic!("expected Err, got Ok");
+    };
+    assert!(
+        matches!(&err, DarError::Corrupt(s) if s.contains("CRC width")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn crc_status_display() {
+    assert_eq!(CrcStatus::Match.to_string(), "CRC match");
+    assert_eq!(CrcStatus::NotStored.to_string(), "no CRC stored");
+    assert_eq!(
+        CrcStatus::Mismatch {
+            stored: "ab".into(),
+            computed: "cd".into(),
+        }
+        .to_string(),
+        "CRC mismatch: stored ab, computed cd"
+    );
+}

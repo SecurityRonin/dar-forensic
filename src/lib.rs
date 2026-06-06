@@ -501,8 +501,20 @@ impl<R: Read + Seek> DarReader<R> {
             .ok_or_else(|| DarError::EntryNotFound(String::from_utf8_lossy(path).into_owned()))?
             .crc
             .clone();
-        let _ = stored;
-        Ok(CrcStatus::NotStored)
+        let Some(stored) = stored else {
+            return Ok(CrcStatus::NotStored);
+        };
+        // The CRC covers the plaintext, so verify against the decompressed data.
+        let data = self.extract(path)?;
+        let computed = dar_crc(&data, stored.len());
+        if computed == stored {
+            Ok(CrcStatus::Match)
+        } else {
+            Ok(CrcStatus::Mismatch {
+                stored: to_hex(&stored),
+                computed: to_hex(&computed),
+            })
+        }
     }
 
     /// Extract a file by path, streaming its (decompressed) bytes to `out` and
@@ -963,8 +975,13 @@ fn parse_catalog<R: Read + Seek>(
                     skip_fsa(r)?;
                 }
 
-                let (size, archive_offset, stored_size, compression, crc) =
-                    read_file_fields(r, format_major, global_comp)?;
+                let FileFields {
+                    size,
+                    archive_offset,
+                    stored_size,
+                    compression,
+                    crc,
+                } = read_file_fields(r, format_major, global_comp)?;
 
                 entries.push(EntryRef {
                     path: join_path(&dir_stack, &name),
@@ -1016,9 +1033,17 @@ fn parse_catalog<R: Read + Seek>(
     Ok((entries, complete))
 }
 
-/// Read the file-specific catalog fields after the inode and return
-/// `(size, archive_offset, stored_size, compression)`. Layout differs by format
-/// (libdar cat_file.cpp / crc.cpp):
+/// The file-specific catalog fields that follow a file inode.
+struct FileFields {
+    size: u64,
+    archive_offset: u64,
+    stored_size: u64,
+    compression: u8,
+    crc: Option<Vec<u8>>,
+}
+
+/// Read the file-specific catalog fields after the inode. Layout differs by
+/// format (libdar cat_file.cpp / crc.cpp):
 /// - 8+: storage_size · file_data_status(1) · comp(1) · length-prefixed CRC.
 /// - 2-7: storage_size · fixed 2-byte CRC; no status/comp byte — the
 ///   archive-global codec applies.
@@ -1027,7 +1052,7 @@ fn read_file_fields<R: Read + Seek>(
     r: &mut R,
     format_major: u32,
     global_comp: u8,
-) -> Result<(u64, u64, u64, u8, Option<Vec<u8>>), DarError> {
+) -> Result<FileFields, DarError> {
     let size = read_infinint(r)?;
     let archive_offset = read_infinint(r)?;
     let (mut stored_size, compression, crc) = if format_major >= 8 {
@@ -1048,7 +1073,13 @@ fn read_file_fields<R: Read + Seek>(
     if format_major <= 7 && stored_size == 0 {
         stored_size = size;
     }
-    Ok((size, archive_offset, stored_size, compression, crc))
+    Ok(FileFields {
+        size,
+        archive_offset,
+        stored_size,
+        compression,
+        crc,
+    })
 }
 
 /// Read a format-8+ length-prefixed CRC: an infinint width then that many raw
@@ -1067,6 +1098,27 @@ fn read_crc<R: Read>(r: &mut R) -> Result<Option<Vec<u8>>, DarError> {
     let mut buf = vec![0u8; crc_size as usize];
     r.read_exact(&mut buf)?;
     Ok(Some(buf))
+}
+
+/// libdar's per-file CRC: an XOR-fold of `data` into a `width`-byte accumulator,
+/// byte `i` into slot `i mod width` (zero-init, read out slot 0 first; no final
+/// transform). `width` must be non-zero (a zero-width CRC is treated as absent).
+fn dar_crc(data: &[u8], width: usize) -> Vec<u8> {
+    let mut acc = vec![0u8; width];
+    for (i, &b) in data.iter().enumerate() {
+        acc[i % width] ^= b;
+    }
+    acc
+}
+
+/// Lowercase hex encoding of `bytes`.
+fn to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(char::from_digit(u32::from(b >> 4), 16).unwrap());
+        s.push(char::from_digit(u32::from(b & 0xf), 16).unwrap());
+    }
+    s
 }
 
 /// Join a directory stack and a leaf name into a `/`-separated raw-byte path.
