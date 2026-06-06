@@ -113,7 +113,9 @@ pub enum EntryKind {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct DarEntry {
-    /// Path as stored, raw bytes — may not be valid UTF-8.
+    /// Path as stored, raw bytes — may not be valid UTF-8. In JSON this is the
+    /// lossy-UTF-8 display string (use the field directly for byte-exact data).
+    #[cfg_attr(feature = "serde", serde(serialize_with = "serialize_bytes_lossy"))]
     pub path: Vec<u8>,
     /// What kind of filesystem object this entry describes.
     pub kind: EntryKind,
@@ -132,7 +134,9 @@ pub struct DarEntry {
     /// Status-change time, seconds since the Unix epoch; `None` for formats
     /// before 8, which do not record it.
     pub ctime: Option<i64>,
-    /// Target of a symbolic link, raw bytes; `None` for non-symlinks.
+    /// Target of a symbolic link, raw bytes; `None` for non-symlinks. In JSON
+    /// this is the lossy-UTF-8 display string (or null).
+    #[cfg_attr(feature = "serde", serde(serialize_with = "serialize_opt_bytes_lossy"))]
     pub symlink_target: Option<Vec<u8>>,
 }
 
@@ -155,6 +159,28 @@ impl DarEntry {
     #[must_use]
     pub fn bodyfile(&self) -> String {
         bodyfile::line(self)
+    }
+}
+
+/// Serialize raw path/target bytes as a lossy-UTF-8 string for JSON export.
+/// The byte-exact value remains available via the typed field; this is a
+/// human-readable display projection (serde_json escapes control characters).
+#[cfg(feature = "serde")]
+fn serialize_bytes_lossy<S: serde::Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&String::from_utf8_lossy(bytes))
+}
+
+// serde's `serialize_with` calls this with `&self.field`, so the signature must
+// take `&Option<_>` (not `Option<&_>`); the lint does not apply here.
+#[cfg(feature = "serde")]
+#[allow(clippy::ref_option)]
+fn serialize_opt_bytes_lossy<S: serde::Serializer>(
+    target: &Option<Vec<u8>>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    match target {
+        Some(bytes) => s.serialize_some(&String::from_utf8_lossy(bytes)),
+        None => s.serialize_none(),
     }
 }
 
