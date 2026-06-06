@@ -400,3 +400,8 @@ fn assert_compressed_fixture(name: &str) {
 fn bzip2_lists_and_extracts() {
     assert_compressed_fixture("v11_bzip2.dar");
 }
+
+#[test]
+fn xz_lists_and_extracts() {
+    assert_compressed_fixture("v11_xz.dar");
+}
