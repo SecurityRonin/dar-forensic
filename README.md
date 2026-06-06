@@ -64,7 +64,7 @@ Archives written by Passware Kit Mobile have no `seqt_catalogue` escape, which o
 | Format 8 (dar 2.4) | `"081"` | Supported — validated against a dar 2.4.24 fixture |
 | Format 7 (dar 2.3) | `"07"` | Supported — validated against a dar 2.3.12 fixture |
 | Formats 2–6 (dar 2.0–2.3) | `"02"`–`"06"` | Same legacy grammar as 7; parsed but not yet validated against a fixture |
-| Format 1 (dar 1.x) | `"01"` | Best-effort; unvalidated (no buildable dar 1.x) |
+| Format 1 (dar 1.0.x) | `"01"` | Supported — validated against a real dar 1.0.0 archive (flagless inode, `size·offset` cat_file, no CRC) |
 | Tape marks on **or** off | — | both supported (e.g. Passware writes them off) |
 | Archive creation / writing | — | Not supported (reader only) |
 

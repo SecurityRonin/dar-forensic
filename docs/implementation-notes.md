@@ -408,6 +408,16 @@ size). Data at `archive_origin + offset` is the raw file content.
 
 **Distinct legacy profiles**: formats 2–7 share the above grammar (the only
 intra-range split is `reading_ver > 1` for `storage_size`); **format 1** (dar
-1.x) additionally omits the EA flag byte and the file CRC and synthesises
-storage_size. Format 1 is unvalidated (no dar 1.x binary builds on a modern
-toolchain) and treated as best-effort.
+1.0.x) additionally omits the EA flag byte (no inode flag), omits the file CRC,
+and stores no `storage_size` — `cat_file` is just `size · offset`, with
+`storage_size` synthesised. A compressed format-1 entry is therefore a codec
+stream of unknown on-disk length, decoded by streaming to its natural end. This
+was validated byte-for-byte against a real dar-1.0.0 edition-1 archive (built in
+a vintage gcc:4.9 container; its GPL test corpus is used only as a local oracle,
+not redistributed). The root entry is named `"root"`.
+
+**Compressed pre-8 archives**: formats ≤7 carry no per-entry compression byte, so
+the archive-global codec (the char after the `version_string`) governs every
+entry *and* the catalogue. When set, the terminateur-located catalogue is a
+single codec stream that must be inflated before parsing — without this any
+compressed pre-8 archive lists zero entries.
