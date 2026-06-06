@@ -23,7 +23,7 @@
 //! dar 2.5.3 source: <https://sourceforge.net/projects/dar/files/dar/2.5.3/>
 //! Contents: files/hello.txt — 15 bytes: "hello format 9\n"
 
-use dar_forensic::{DarEntry, DarReader, EntryKind};
+use dar_forensic::{CrcStatus, DarEntry, DarReader, EntryKind};
 use std::io::Cursor;
 use std::path::Path;
 
@@ -535,4 +535,69 @@ fn write_bodyfile_emits_one_well_formed_line_per_entry() {
             .is_some_and(|m| m.starts_with("r/r")),
         "{hello}"
     );
+}
+
+// ── CRC verification against real fixtures ────────────────────────────────────
+// These validate the XOR-fold algorithm, width handling, and (for the
+// compressed fixtures) that the CRC covers the *decompressed* plaintext.
+
+#[test]
+fn verify_v11_hello_matches() {
+    let r = open_v11();
+    let path = sole_file(&r).path;
+    let mut r = r;
+    assert_eq!(r.verify(&path).expect("verify"), CrcStatus::Match);
+}
+
+#[test]
+fn verify_v9_hello_matches() {
+    let r = open_v9();
+    let path = sole_file(&r).path;
+    let mut r = r;
+    assert_eq!(r.verify(&path).expect("verify"), CrcStatus::Match);
+}
+
+#[test]
+fn verify_v8_hello_matches() {
+    let r = open_v8();
+    let path = sole_file(&r).path;
+    let mut r = r;
+    assert_eq!(r.verify(&path).expect("verify"), CrcStatus::Match);
+}
+
+#[test]
+fn verify_v10_hello_matches() {
+    let r = open_v10();
+    let path = sole_file(&r).path;
+    let mut r = r;
+    assert_eq!(r.verify(&path).expect("verify"), CrcStatus::Match);
+}
+
+#[test]
+fn verify_v7_hello_matches() {
+    let r = open_v7();
+    let path = sole_file(&r).path;
+    let mut r = r;
+    assert_eq!(r.verify(&path).expect("verify"), CrcStatus::Match);
+}
+
+#[cfg(feature = "gzip")]
+#[test]
+fn verify_gzip_payload_matches_decompressed_plaintext() {
+    let mut r = open_fixture("v11_gzip.dar");
+    assert_eq!(r.verify("payload.txt").expect("verify"), CrcStatus::Match);
+}
+
+#[cfg(feature = "bzip2")]
+#[test]
+fn verify_bzip2_payload_matches() {
+    let mut r = open_fixture("v11_bzip2.dar");
+    assert_eq!(r.verify("payload.txt").expect("verify"), CrcStatus::Match);
+}
+
+#[cfg(feature = "xz")]
+#[test]
+fn verify_xz_payload_matches() {
+    let mut r = open_fixture("v11_xz.dar");
+    assert_eq!(r.verify("payload.txt").expect("verify"), CrcStatus::Match);
 }

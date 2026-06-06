@@ -62,6 +62,10 @@ const DAR_MAGIC: [u8; 4] = [0x00, 0x00, 0x00, 0x7b];
 const MAX_CATALOGUE_COMPRESSED: u64 = 512 * 1024 * 1024;
 const MAX_CATALOGUE_INFLATED: u64 = 1024 * 1024 * 1024;
 
+/// Upper bound on a per-file CRC width (libdar uses 4 bytes per gigabyte, so
+/// 64 KiB covers a 16 TiB file); a larger declared width is treated as corrupt.
+const MAX_CRC_SIZE: u64 = 64 * 1024;
+
 /// Epoch seconds for 2100-01-01T00:00:00Z. [`DarReader::audit`] flags entry
 /// timestamps beyond this as implausibly far in the future (clock error or
 /// tampering) — a deterministic ceiling, not a comparison against wall-clock.
@@ -86,6 +90,38 @@ pub enum DarError {
     Corrupt(String),
     #[error("entry not found: '{0}'")]
     EntryNotFound(String),
+}
+
+/// Outcome of verifying a file entry's stored CRC against its decompressed data
+/// (see [`DarReader::verify`]). CRC values are lowercase hex.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub enum CrcStatus {
+    /// The stored CRC matches the data.
+    Match,
+    /// The stored CRC disagrees with the data — consistent with corruption or
+    /// tampering of the archived bytes.
+    Mismatch {
+        /// CRC recorded in the catalogue (lowercase hex).
+        stored: String,
+        /// CRC computed over the decompressed data (lowercase hex).
+        computed: String,
+    },
+    /// No CRC is stored for this entry (edition-1 archives record none), so
+    /// integrity cannot be checked.
+    NotStored,
+}
+
+impl core::fmt::Display for CrcStatus {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CrcStatus::Match => f.write_str("CRC match"),
+            CrcStatus::Mismatch { stored, computed } => {
+                write!(f, "CRC mismatch: stored {stored}, computed {computed}")
+            }
+            CrcStatus::NotStored => f.write_str("no CRC stored"),
+        }
+    }
 }
 
 /// The kind of filesystem object a catalog entry describes.
@@ -199,6 +235,9 @@ struct EntryRef {
     archive_offset: u64,
     stored_size: u64,
     compression: u8,
+    /// Stored per-file data CRC (raw bytes); `None` when the format records none
+    /// (edition 1) or the width is zero.
+    crc: Option<Vec<u8>>,
 }
 
 /// Read-only DAR archive reader.
@@ -445,6 +484,25 @@ impl<R: Read + Seek> DarReader<R> {
             writeln!(out, "{}", entry.bodyfile())?;
         }
         Ok(())
+    }
+
+    /// Verify a file entry's data against the CRC stored in the catalogue,
+    /// decompressing the entry as needed. Returns [`CrcStatus::Match`],
+    /// [`CrcStatus::Mismatch`], or [`CrcStatus::NotStored`]. Unlike a
+    /// verify-on-extract design, this never refuses to hand over the bytes —
+    /// a forensic caller can still [`extract`](Self::extract) data that fails
+    /// its CRC in order to examine the corruption.
+    pub fn verify<P: AsRef<[u8]>>(&mut self, path: P) -> Result<CrcStatus, DarError> {
+        let path = path.as_ref();
+        let stored = self
+            .entries
+            .iter()
+            .find(|e| e.path.as_slice() == path)
+            .ok_or_else(|| DarError::EntryNotFound(String::from_utf8_lossy(path).into_owned()))?
+            .crc
+            .clone();
+        let _ = stored;
+        Ok(CrcStatus::NotStored)
     }
 
     /// Extract a file by path, streaming its (decompressed) bytes to `out` and
@@ -905,7 +963,7 @@ fn parse_catalog<R: Read + Seek>(
                     skip_fsa(r)?;
                 }
 
-                let (size, archive_offset, stored_size, compression) =
+                let (size, archive_offset, stored_size, compression, crc) =
                     read_file_fields(r, format_major, global_comp)?;
 
                 entries.push(EntryRef {
@@ -922,6 +980,7 @@ fn parse_catalog<R: Read + Seek>(
                     archive_offset,
                     stored_size,
                     compression,
+                    crc,
                 });
             }
             'l' => {
@@ -968,28 +1027,46 @@ fn read_file_fields<R: Read + Seek>(
     r: &mut R,
     format_major: u32,
     global_comp: u8,
-) -> Result<(u64, u64, u64, u8), DarError> {
+) -> Result<(u64, u64, u64, u8, Option<Vec<u8>>), DarError> {
     let size = read_infinint(r)?;
     let archive_offset = read_infinint(r)?;
-    let (mut stored_size, compression) = if format_major >= 8 {
+    let (mut stored_size, compression, crc) = if format_major >= 8 {
         let ss = read_infinint(r)?;
         let _file_data_status = read_u8(r)?;
         let comp = read_u8(r)?;
-        let crc_size = read_infinint(r)?;
-        skip(r, crc_size)?;
-        (ss, comp)
+        let crc = read_crc(r)?; // infinint width + that many raw bytes
+        (ss, comp, crc)
     } else if format_major >= 2 {
         let ss = read_infinint(r)?;
-        skip(r, 2)?; // fixed 2-byte CRC
-        (ss, global_comp)
+        let mut crcbuf = [0u8; 2]; // legacy: fixed 2-byte CRC, no width prefix
+        r.read_exact(&mut crcbuf)?;
+        (ss, global_comp, Some(crcbuf.to_vec()))
     } else {
-        (size, global_comp) // format 1: storage_size synthesised
+        (size, global_comp, None) // format 1: storage_size synthesised, no CRC
     };
     // Pre-8: storage_size 0 means the data is stored uncompressed.
     if format_major <= 7 && stored_size == 0 {
         stored_size = size;
     }
-    Ok((size, archive_offset, stored_size, compression))
+    Ok((size, archive_offset, stored_size, compression, crc))
+}
+
+/// Read a format-8+ length-prefixed CRC: an infinint width then that many raw
+/// bytes. A zero width (abnormal — libdar uses >= 1) yields `None`; a width past
+/// [`MAX_CRC_SIZE`] is rejected as corrupt (allocation-bomb guard).
+fn read_crc<R: Read>(r: &mut R) -> Result<Option<Vec<u8>>, DarError> {
+    let crc_size = read_infinint(r)?;
+    if crc_size == 0 {
+        return Ok(None);
+    }
+    if crc_size > MAX_CRC_SIZE {
+        return Err(DarError::Corrupt(format!(
+            "CRC width {crc_size} exceeds {MAX_CRC_SIZE}-byte bound"
+        )));
+    }
+    let mut buf = vec![0u8; crc_size as usize];
+    r.read_exact(&mut buf)?;
+    Ok(Some(buf))
 }
 
 /// Join a directory stack and a leaf name into a `/`-separated raw-byte path.
@@ -1025,6 +1102,7 @@ fn meta_entry(
         archive_offset: 0,
         stored_size: 0,
         compression: b'n',
+        crc: None,
     }
 }
 

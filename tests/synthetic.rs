@@ -4,7 +4,9 @@
 //! specific code path that real archive fixtures cannot reach.  No on-disk
 //! files are required.
 
-use dar_forensic::{Anomaly, AnomalyKind, DarEntry, DarError, DarReader, EntryKind, Severity};
+use dar_forensic::{
+    Anomaly, AnomalyKind, CrcStatus, DarEntry, DarError, DarReader, EntryKind, Severity,
+};
 use std::io::Cursor;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -1614,4 +1616,70 @@ fn lean_build_recognises_refuses_and_flags_gzip_entry() {
         r.audit().iter().any(|a| a.code == "DAR-CODEC-UNSUPPORTED"),
         "audit must flag a gzip entry as unsupported when gzip is not compiled in"
     );
+}
+
+// ── CRC verification ──────────────────────────────────────────────────────────
+
+/// A format-8+ stored ('n') file entry named `name` declaring `size` bytes at
+/// archive_offset 0, carrying the caller's `crc` (length-prefixed).
+fn file_entry_with_crc(name: &str, size: u32, crc: &[u8]) -> Vec<u8> {
+    let mut v = vec![0x06u8]; // cat_sig → 'f'
+    v.extend_from_slice(name.as_bytes());
+    v.push(0x00);
+    v.extend(inode_base(false));
+    v.extend_from_slice(&inf(size)); // logical size
+    v.extend_from_slice(&inf(0)); // archive_offset
+    v.extend_from_slice(&inf(size)); // stored_size
+    v.push(0x00); // enc = none
+    v.push(b'n'); // comp = none (stored)
+    v.extend_from_slice(&inf(crc.len() as u32)); // crc width
+    v.extend_from_slice(crc); // crc bytes
+    v
+}
+
+#[test]
+fn verify_matches_correct_crc() {
+    const DATA: &[u8] = b"AB"; // XOR-fold width 2 → [0x41, 0x42]
+    let mut buf = header();
+    buf.extend_from_slice(DATA); // data at archive_offset 0
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    buf.extend(file_entry_with_crc("f", DATA.len() as u32, &[0x41, 0x42]));
+    buf.push(EOD);
+    let mut r = DarReader::open(Cursor::new(buf)).expect("open");
+    assert_eq!(r.verify("f").expect("verify"), CrcStatus::Match);
+}
+
+#[test]
+fn verify_detects_mismatch() {
+    const DATA: &[u8] = b"AB";
+    let mut buf = header();
+    buf.extend_from_slice(DATA);
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    buf.extend(file_entry_with_crc("f", DATA.len() as u32, &[0xff, 0xff]));
+    buf.push(EOD);
+    let mut r = DarReader::open(Cursor::new(buf)).expect("open");
+    match r.verify("f").expect("verify") {
+        CrcStatus::Mismatch { stored, computed } => {
+            assert_eq!(stored, "ffff");
+            assert_eq!(computed, "4142");
+        }
+        other => panic!("expected Mismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn verify_not_stored_when_crc_absent() {
+    // file_entry writes a zero-width CRC, so no CRC is recorded.
+    let dar = minimal_dar(vec![file_entry("f", 0, b'n', 0, 0)]);
+    let mut r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert_eq!(r.verify("f").expect("verify"), CrcStatus::NotStored);
+}
+
+#[test]
+fn verify_unknown_path_errors() {
+    let dar = minimal_dar(vec![file_entry("f", 0, b'n', 0, 0)]);
+    let mut r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert!(matches!(r.verify("nope"), Err(DarError::EntryNotFound(_))));
 }
