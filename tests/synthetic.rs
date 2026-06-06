@@ -689,6 +689,60 @@ fn extract_gigantic_stored_size_does_not_allocate() {
     assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
 }
 
+/// The compressed extraction path enforces the same stored-bytes bounds check as
+/// the stored path: a codec entry claiming more on-disk bytes than the archive
+/// holds is rejected as corrupt before any decode is attempted.
+#[test]
+fn extract_compressed_stored_size_beyond_archive_returns_corrupt() {
+    let mut buf = header();
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    // comp='z' (gzip) but claims 1 MiB of stored bytes that do not exist.
+    let mut entry = vec![0x06u8]; // cat_sig → 'f'
+    entry.extend_from_slice(b"toobig.z");
+    entry.push(0x00);
+    entry.extend(inode_base(false));
+    entry.extend_from_slice(&inf(0)); // logical size = 0
+    entry.extend(inf64(0)); // archive_offset
+    entry.extend(inf64(1 << 20)); // stored_size = 1 MiB (absent)
+    entry.push(0x00); // encryption = none
+    entry.push(b'z'); // compression = gzip
+    entry.extend_from_slice(&inf(0)); // crc_size = 0
+    buf.extend(entry);
+    buf.push(EOD);
+
+    let mut r = DarReader::open(Cursor::new(buf)).expect("open");
+    let err = r.extract("toobig.z").unwrap_err();
+    assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
+}
+
+/// A failing output writer must surface as an error, never be silently
+/// swallowed: the stored-path `io::copy` result is propagated to the caller.
+#[test]
+fn extract_to_stored_propagates_writer_error() {
+    struct FailingWriter;
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("sink is full"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    const PAYLOAD: &[u8] = b"test";
+    let mut buf = header();
+    buf.extend_from_slice(PAYLOAD);
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    buf.extend(file_entry("out.bin", 0, b'n', 0, PAYLOAD.len() as u32));
+    buf.push(EOD);
+
+    let mut r = DarReader::open(Cursor::new(buf)).expect("open");
+    let err = r.extract_to("out.bin", &mut FailingWriter).unwrap_err();
+    assert!(matches!(err, DarError::Io(_)), "got {err:?}");
+}
+
 // ── slice-header extension branches ──────────────────────────────────────────
 
 /// A format-8+ header ('T' extension) truncated before the TLV count must map

@@ -223,7 +223,7 @@ impl<R: Read + Seek> DarReader<R> {
                     .by_ref()
                     .take(MAX_CATALOGUE_COMPRESSED)
                     .read_to_end(&mut compressed)?;
-                let inflated = decompress(&compressed, global_comp, MAX_CATALOGUE_INFLATED)?;
+                let inflated = inflate_catalogue(&compressed, global_comp)?;
                 let mut cur = Cursor::new(inflated);
                 skip(&mut cur, 10)?; // catalog label
                 if format_value >= FORMAT_11_1 {
@@ -272,7 +272,7 @@ impl<R: Read + Seek> DarReader<R> {
                     .by_ref()
                     .take(MAX_CATALOGUE_COMPRESSED)
                     .read_to_end(&mut compressed)?;
-                let inflated = decompress(&compressed, global_comp, MAX_CATALOGUE_INFLATED)?;
+                let inflated = inflate_catalogue(&compressed, global_comp)?;
                 (entries, complete) =
                     parse_catalog(&mut Cursor::new(inflated), format_major, global_comp)?;
             } else {
@@ -332,12 +332,6 @@ impl<R: Read + Seek> DarReader<R> {
         path: P,
         out: &mut W,
     ) -> Result<u64, DarError> {
-        let _ = (path.as_ref(), out);
-        Err(DarError::Corrupt("extract_to not implemented".into()))
-    }
-
-    /// Extract a file by path, returning its raw bytes.
-    pub fn extract<P: AsRef<[u8]>>(&mut self, path: P) -> Result<Vec<u8>, DarError> {
         let path = path.as_ref();
         let name = String::from_utf8_lossy(path);
         let entry = self
@@ -347,10 +341,9 @@ impl<R: Read + Seek> DarReader<R> {
             .ok_or_else(|| DarError::EntryNotFound(name.clone().into_owned()))?
             .clone();
 
-        // The raw bytes live at archive_origin + archive_offset.  Both fields
-        // are attacker-controlled, so the sum must be checked, and the claimed
-        // size validated against the bytes that actually exist before any
-        // allocation — otherwise a forged stored_size is an allocation bomb.
+        // The raw bytes live at archive_origin + archive_offset. Both fields are
+        // attacker-controlled, so the sum is checked and the claimed length
+        // validated against the bytes that actually exist before reading.
         let start = self
             .archive_origin
             .checked_add(entry.archive_offset)
@@ -363,56 +356,61 @@ impl<R: Read + Seek> DarReader<R> {
                 "'{name}' starts at {start}, past archive end {end}"
             )));
         }
+        let available = end - start;
+        self.inner.seek(SeekFrom::Start(start))?;
 
-        // Format 1 stores no per-entry storage_size, so a compressed entry is a
-        // codec stream of unknown on-disk length (dar 1.x is gzip/zlib-only).
-        // Decode it straight from the archive — the decoder stops at the stream's
-        // natural end — bounded by the catalog `size`, rather than reading a
-        // fixed, synthesised length.
-        if self.format_major == 1 && is_compressed(entry.compression) {
-            self.inner.seek(SeekFrom::Start(start))?;
-            let out = read_bounded(
-                flate2::read::ZlibDecoder::new(&mut self.inner),
-                entry.size,
-                "zlib",
-            )?;
-            if out.len() as u64 != entry.size {
+        // Stored: stream the raw bytes straight through, no buffering.
+        if !is_compressed(entry.compression) {
+            if entry.stored_size > available {
                 return Err(DarError::Corrupt(format!(
-                    "'{name}' decompressed to {} bytes but catalog declares {}",
-                    out.len(),
-                    entry.size
+                    "'{name}' claims {} stored bytes but only {available} remain",
+                    entry.stored_size
                 )));
             }
-            return Ok(out);
+            return Ok(std::io::copy(
+                &mut self.inner.by_ref().take(entry.stored_size),
+                out,
+            )?);
         }
 
-        let available = end - start;
-        if entry.stored_size > available {
-            return Err(DarError::Corrupt(format!(
-                "'{name}' claims {} stored bytes but only {available} remain",
-                entry.stored_size
-            )));
+        // Compressed: decode straight to `out`, capped at the declared size so a
+        // forged stream cannot over-inflate (streaming decompression-bomb guard).
+        let mut cap = CapWriter {
+            inner: out,
+            written: 0,
+            max: entry.size,
+        };
+        if self.format_major == 1 {
+            // Format 1 stores no storage_size; the codec stream (dar 1.x is
+            // gzip/zlib-only) runs from the offset to its own natural end.
+            decode_stream(self.inner.by_ref(), entry.compression, &mut cap)?;
+        } else {
+            // 8+/2-7: exactly stored_size compressed bytes on disk.
+            if entry.stored_size > available {
+                return Err(DarError::Corrupt(format!(
+                    "'{name}' claims {} stored bytes but only {available} remain",
+                    entry.stored_size
+                )));
+            }
+            let mut data = vec![0u8; entry.stored_size as usize];
+            self.inner.read_exact(&mut data)?;
+            decode_stream(&data[..], entry.compression, &mut cap)?;
         }
-
-        self.inner.seek(SeekFrom::Start(start))?;
-        let mut data = vec![0u8; entry.stored_size as usize];
-        self.inner.read_exact(&mut data)?;
-
-        if !is_compressed(entry.compression) {
-            return Ok(data);
-        }
-        // Each compressed entry is an independent stream; its uncompressed length
-        // is the catalog `size`, so decode exactly that and reject any mismatch —
-        // a forged stream cannot over-inflate past the declared size.
-        let out = decompress(&data, entry.compression, entry.size)?;
-        if out.len() as u64 != entry.size {
+        if cap.written != entry.size {
             return Err(DarError::Corrupt(format!(
                 "'{name}' decompressed to {} bytes but catalog declares {}",
-                out.len(),
-                entry.size
+                cap.written, entry.size
             )));
         }
-        Ok(out)
+        Ok(cap.written)
+    }
+
+    /// Extract a file by path, returning its raw bytes. Buffers the whole entry
+    /// in memory; prefer [`extract_to`](Self::extract_to) for large files.
+    pub fn extract<P: AsRef<[u8]>>(&mut self, path: P) -> Result<Vec<u8>, DarError> {
+        let mut buf = Vec::new();
+        self.extract_to(path, &mut buf)?;
+        Ok(buf)
     }
 }
 
@@ -571,78 +569,76 @@ fn is_compressed(algo: u8) -> bool {
     )
 }
 
-/// Inflate one compressed stream, dispatching on the libdar codec char and
-/// rejecting output longer than `max_out` (decompression-bomb guard). Trailing
-/// bytes after the stream (e.g. the archive trailer) are ignored by the decoder.
-fn decompress(data: &[u8], algo: u8, max_out: u64) -> Result<Vec<u8>, DarError> {
-    match algo.to_ascii_lowercase() {
-        // dar's "gzip" is a raw zlib stream (78 xx), not a gzip (1f 8b) wrapper.
-        b'z' => read_bounded(flate2::read::ZlibDecoder::new(data), max_out, "zlib"),
-        b'y' => read_bounded(bzip2_rs::DecoderReader::new(data), max_out, "bzip2"),
-        b'x' => {
-            // lzma-rs is writer-driven and has no output cap, so a BoundedWriter
-            // enforces the same decompression-bomb guard the Read codecs get.
-            let mut input: &[u8] = data;
-            let mut out = BoundedWriter {
-                buf: Vec::new(),
-                max: max_out,
-            };
-            match lzma_rs::xz_decompress(&mut input, &mut out) {
-                Ok(()) => Ok(out.buf),
-                // The DAR trailer follows the catalogue's xz stream. lzma-rs
-                // fully decodes and validates the stream (blocks, index, CRC,
-                // footer magic) before rejecting trailing bytes, so on this one
-                // error the output is already complete and sound. Per-file
-                // extract passes exactly stored_size bytes and never trails.
-                // (String coupling is why lzma-rs is pinned to 0.3.x.)
-                Err(lzma_rs::error::Error::XzError(ref m))
-                    if m == "Unexpected data after last XZ block" =>
-                {
-                    Ok(out.buf)
-                }
-                Err(e) => Err(DarError::Corrupt(format!("xz decode failed: {e}"))),
-            }
-        }
-        other => Err(DarError::Corrupt(format!(
-            "unsupported compression '{}'",
-            other as char
-        ))),
-    }
+/// Inflate a compressed catalogue into a single buffer, routing through the same
+/// [`decode_stream`]/[`CapWriter`] path the per-file extractor uses and capping
+/// output at `MAX_CATALOGUE_INFLATED` (decompression-bomb guard). Trailing bytes
+/// after the codec stream (the archive trailer) are ignored by the decoder.
+fn inflate_catalogue(compressed: &[u8], algo: u8) -> Result<Vec<u8>, DarError> {
+    let mut out = Vec::new();
+    let mut cap = CapWriter {
+        inner: &mut out,
+        written: 0,
+        max: MAX_CATALOGUE_INFLATED,
+    };
+    decode_stream(compressed, algo, &mut cap)?;
+    Ok(out)
 }
 
-/// A `Write` sink that buffers up to `max` bytes and then fails, capping the
-/// output of a writer-driven decoder (lzma-rs) against a decompression bomb.
-struct BoundedWriter {
-    buf: Vec<u8>,
+/// A `Write` adapter that forwards to `inner`, counting bytes written and failing
+/// once more than `max` would be written — the streaming decompression-bomb
+/// guard used by [`DarReader::extract_to`].
+struct CapWriter<'a, W: Write> {
+    inner: &'a mut W,
+    written: u64,
     max: u64,
 }
 
-impl Write for BoundedWriter {
+impl<W: Write> Write for CapWriter<'_, W> {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        if self.buf.len() as u64 + data.len() as u64 > self.max {
+        if self.written + data.len() as u64 > self.max {
             return Err(std::io::Error::other("decompressed data exceeds bound"));
         }
-        self.buf.extend_from_slice(data);
+        self.inner.write_all(data)?;
+        self.written += data.len() as u64;
         Ok(data.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+        self.inner.flush()
     }
 }
 
-/// Read a decoder to EOF, capping output at `max_out` bytes (one extra byte is
-/// requested so an over-long stream is detected, not silently truncated).
-fn read_bounded<R: Read>(decoder: R, max_out: u64, what: &str) -> Result<Vec<u8>, DarError> {
-    let mut out = Vec::new();
-    decoder
-        .take(max_out.saturating_add(1))
-        .read_to_end(&mut out)
-        .map_err(|e| DarError::Corrupt(format!("{what} decode failed: {e}")))?;
-    if out.len() as u64 > max_out {
-        return Err(DarError::Corrupt("decompressed data exceeds bound".into()));
+/// Stream-decode a compressed input to `out`, dispatching on the libdar codec
+/// char. The Read decoders stop at the codec stream's end (ignoring trailing
+/// bytes); lzma-rs rejects trailing bytes only after fully validating the
+/// stream, so that one error is treated as success.
+fn decode_stream<R: Read, W: Write>(input: R, algo: u8, out: &mut W) -> Result<(), DarError> {
+    match algo.to_ascii_lowercase() {
+        b'z' => {
+            std::io::copy(&mut flate2::read::ZlibDecoder::new(input), out)
+                .map_err(|e| DarError::Corrupt(format!("zlib decode failed: {e}")))?;
+        }
+        b'y' => {
+            std::io::copy(&mut bzip2_rs::DecoderReader::new(input), out)
+                .map_err(|e| DarError::Corrupt(format!("bzip2 decode failed: {e}")))?;
+        }
+        b'x' => {
+            let mut br = std::io::BufReader::new(input);
+            match lzma_rs::xz_decompress(&mut br, out) {
+                Ok(()) => {}
+                Err(lzma_rs::error::Error::XzError(ref m))
+                    if m == "Unexpected data after last XZ block" => {}
+                Err(e) => return Err(DarError::Corrupt(format!("xz decode failed: {e}"))),
+            }
+        }
+        other => {
+            return Err(DarError::Corrupt(format!(
+                "unsupported compression '{}'",
+                other as char
+            )))
+        }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Locate the catalogue in a pre-format-8 archive via the end `terminateur`
@@ -1429,42 +1425,68 @@ mod tests {
         assert!(matches!(&err, DarError::Corrupt(s) if s == "archive body too short"));
     }
 
-    // ── decompress ─────────────────────────────────────────────────────────────
+    // ── decode_stream / CapWriter ────────────────────────────────────────────
 
     #[test]
-    fn decompress_rejects_decompression_bomb() {
+    fn decode_stream_caps_decompression_bomb() {
         use flate2::{write::ZlibEncoder, Compression};
         use std::io::Write;
         let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
         enc.write_all(&[0u8; 4096]).unwrap();
         let blob = enc.finish().unwrap();
-        // Inflates to 4096 bytes but the caller caps output at 16.
-        let err = decompress(&blob, b'z', 16).unwrap_err();
+        // Inflates to 4096 bytes but the CapWriter caps output at 16.
+        let mut sink = Vec::new();
+        let mut cap = CapWriter {
+            inner: &mut sink,
+            written: 0,
+            max: 16,
+        };
+        let err = decode_stream(&blob[..], b'z', &mut cap).unwrap_err();
         assert!(matches!(&err, DarError::Corrupt(s) if s.contains("exceeds bound")));
     }
 
     #[test]
-    fn decompress_rejects_malformed_zlib() {
-        let err = decompress(b"not a zlib stream at all", b'z', 1024).unwrap_err();
+    fn decode_stream_rejects_malformed_zlib() {
+        let err = decode_stream(
+            b"not a zlib stream at all".as_slice(),
+            b'z',
+            &mut Vec::new(),
+        )
+        .unwrap_err();
         assert!(matches!(&err, DarError::Corrupt(s) if s.contains("zlib decode failed")));
     }
 
     #[test]
-    fn decompress_rejects_malformed_xz() {
-        let err = decompress(b"this is not an xz stream", b'x', 1024).unwrap_err();
+    fn decode_stream_rejects_malformed_bzip2() {
+        let err =
+            decode_stream(b"not a bzip2 stream".as_slice(), b'y', &mut Vec::new()).unwrap_err();
+        assert!(matches!(&err, DarError::Corrupt(s) if s.contains("bzip2 decode failed")));
+    }
+
+    #[test]
+    fn decode_stream_rejects_malformed_xz() {
+        let err = decode_stream(
+            b"this is not an xz stream".as_slice(),
+            b'x',
+            &mut Vec::new(),
+        )
+        .unwrap_err();
         assert!(matches!(&err, DarError::Corrupt(s) if s.contains("xz decode failed")));
     }
 
     #[test]
-    fn bounded_writer_caps_output_and_flushes() {
-        let mut w = BoundedWriter {
-            buf: Vec::new(),
+    fn cap_writer_forwards_within_bound_and_fails_over() {
+        use std::io::Write;
+        let mut sink = Vec::new();
+        let mut w = CapWriter {
+            inner: &mut sink,
+            written: 0,
             max: 4,
         };
         assert_eq!(w.write(b"ab").unwrap(), 2); // within bound
         w.flush().unwrap();
         let err = w.write(b"cde").unwrap_err(); // 2 + 3 > 4
         assert_eq!(err.to_string(), "decompressed data exceeds bound");
-        assert_eq!(w.buf, b"ab");
+        assert_eq!(sink, b"ab");
     }
 }
