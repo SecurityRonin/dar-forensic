@@ -8,6 +8,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-file CRC verification.** `DarReader::verify(path)` recomputes libdar's
+  per-file CRC over the decompressed data and compares it to the value stored in
+  the catalogue, returning `CrcStatus::Match`, `Mismatch { stored, computed }`
+  (lowercase hex), or `NotStored` (edition-1 archives record none). It never
+  withholds the bytes — data that fails its CRC can still be `extract`ed to
+  examine the corruption. Validated against real dar fixtures (formats 7–11 and
+  the gzip/bzip2/xz archives, confirming the CRC covers the decompressed
+  plaintext). The catalogue CRC width is bounded against an allocation bomb.
 - **Optional compression codecs (`gzip` / `bzip2` / `xz`), all on by default.**
   Build with `default-features = false` for a lean reader carrying zero codec
   dependencies — enough to list and extract *stored* archives (e.g. the
