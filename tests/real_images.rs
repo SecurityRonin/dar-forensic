@@ -386,7 +386,8 @@ fn assert_compressed_fixture(name: &str) {
 
     let mut r = open_fixture(name);
     assert_eq!(
-        r.extract("payload.txt").expect("extract compressed payload"),
+        r.extract("payload.txt")
+            .expect("extract compressed payload"),
         expected_payload()
     );
     assert_eq!(

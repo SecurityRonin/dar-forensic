@@ -440,23 +440,28 @@ fn is_compressed(algo: u8) -> bool {
 /// bytes after the stream (e.g. the archive trailer) are ignored by the decoder.
 fn decompress(data: &[u8], algo: u8, max_out: u64) -> Result<Vec<u8>, DarError> {
     match algo.to_ascii_lowercase() {
-        b'z' => {
-            // dar's "gzip" is a raw zlib stream (78 xx), not a gzip (1f 8b) wrapper.
-            let mut out = Vec::new();
-            flate2::read::ZlibDecoder::new(data)
-                .take(max_out.saturating_add(1))
-                .read_to_end(&mut out)
-                .map_err(|e| DarError::Corrupt(format!("zlib decode failed: {e}")))?;
-            if out.len() as u64 > max_out {
-                return Err(DarError::Corrupt("decompressed data exceeds bound".into()));
-            }
-            Ok(out)
-        }
+        // dar's "gzip" is a raw zlib stream (78 xx), not a gzip (1f 8b) wrapper.
+        b'z' => read_bounded(flate2::read::ZlibDecoder::new(data), max_out, "zlib"),
+        b'y' => read_bounded(bzip2_rs::DecoderReader::new(data), max_out, "bzip2"),
         other => Err(DarError::Corrupt(format!(
             "unsupported compression '{}'",
             other as char
         ))),
     }
+}
+
+/// Read a decoder to EOF, capping output at `max_out` bytes (one extra byte is
+/// requested so an over-long stream is detected, not silently truncated).
+fn read_bounded<R: Read>(decoder: R, max_out: u64, what: &str) -> Result<Vec<u8>, DarError> {
+    let mut out = Vec::new();
+    decoder
+        .take(max_out.saturating_add(1))
+        .read_to_end(&mut out)
+        .map_err(|e| DarError::Corrupt(format!("{what} decode failed: {e}")))?;
+    if out.len() as u64 > max_out {
+        return Err(DarError::Corrupt("decompressed data exceeds bound".into()));
+    }
+    Ok(out)
 }
 
 /// Locate the catalogue in a pre-format-8 archive via the end `terminateur`

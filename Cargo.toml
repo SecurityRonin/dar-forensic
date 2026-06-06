@@ -16,6 +16,7 @@ categories  = ["parser-implementations"]
 [dependencies]
 thiserror = { workspace = true }
 flate2    = { workspace = true }
+bzip2-rs  = { workspace = true }
 
 [dev-dependencies]
 tempfile  = { workspace = true }
@@ -32,6 +33,8 @@ thiserror = "2"
 tempfile  = "3"
 # Pure-Rust (miniz_oxide) zlib backend — dar's "gzip" is a raw zlib stream.
 flate2    = { version = "1", default-features = false, features = ["rust_backend"] }
+# Pure-Rust bzip2 decoder (decompress-only); keeps unsafe_code = "deny".
+bzip2-rs  = "0.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
