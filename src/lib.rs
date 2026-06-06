@@ -102,6 +102,10 @@ pub struct DarReader<R: Read + Seek> {
     /// Byte position immediately after the slice header TLV block.
     /// `archive_origin + archive_offset` = absolute position of raw file bytes.
     archive_origin: u64,
+    /// Archive format major version (`value() >> 8`). Format 1 stores no
+    /// per-entry `storage_size`, so a compressed format-1 entry is decoded by
+    /// streaming the codec to its natural end rather than reading a fixed length.
+    format_major: u32,
     entries: Vec<EntryRef>,
 }
 
@@ -126,6 +130,7 @@ impl<R: Read + Seek> DarReader<R> {
         // (libdar header.cpp extension handling; terminateur.cpp).
         let entries;
         let archive_origin;
+        let format_major;
         if extension == b'T' {
             // TLV list: infinint(count) then count × (u16 type + infinint len + data)
             let tlv_count = read_infinint(&mut reader).map_err(|e| match e {
@@ -149,7 +154,7 @@ impl<R: Read + Seek> DarReader<R> {
             // true → seqt_catalogue tape mark found (catalog has label + maybe path);
             // false → located by its ref_data_name label (tape marks off, e.g. Passware).
             let via_escape = find_catalogue(&mut reader, &label)?;
-            let format_major = format_value >> 8;
+            format_major = format_value >> 8;
             if via_escape && is_compressed(global_comp) {
                 // The catalogue is a single stream compressed with the archive
                 // codec, beginning right after the seqt_catalogue escape and
@@ -167,7 +172,7 @@ impl<R: Read + Seek> DarReader<R> {
                 if format_value >= FORMAT_11_1 {
                     skip_nul_string(&mut cur)?;
                 }
-                entries = parse_catalog(&mut cur, format_major)?;
+                entries = parse_catalog(&mut cur, format_major, global_comp)?;
             } else {
                 if via_escape {
                     skip(&mut reader, 10)?; // catalog label
@@ -177,7 +182,7 @@ impl<R: Read + Seek> DarReader<R> {
                         skip_nul_string(&mut reader)?;
                     }
                 }
-                entries = parse_catalog(&mut reader, format_major)?;
+                entries = parse_catalog(&mut reader, format_major, global_comp)?;
             }
         } else if extension == b'N' || extension == b'S' {
             if extension == b'S' {
@@ -185,6 +190,11 @@ impl<R: Read + Seek> DarReader<R> {
             }
             archive_origin = reader.stream_position()?;
             let format_value = read_format_value(&mut reader); // 3-byte edition: value = major*256
+            format_major = format_value >> 8;
+            // The global compression char follows the version string (same as
+            // format 8+). Formats <= 7 carry no per-entry compression byte, so
+            // this single char governs both the catalogue and every entry's data.
+            let global_comp = read_u8(&mut reader).unwrap_or(b'n');
             let cat_offset = read_terminateur(&mut reader)?;
             let cat_start = archive_origin
                 .checked_add(cat_offset)
@@ -197,7 +207,19 @@ impl<R: Read + Seek> DarReader<R> {
             }
             reader.seek(SeekFrom::Start(cat_start))?;
             // Legacy catalogue: no 10-byte label, no path — entries begin here.
-            entries = parse_catalog(&mut reader, format_value >> 8)?;
+            // When the archive is compressed, the catalogue is a single codec
+            // stream (the terminateur addresses its start); inflate it first.
+            if is_compressed(global_comp) {
+                let mut compressed = Vec::new();
+                reader
+                    .by_ref()
+                    .take(MAX_CATALOGUE_COMPRESSED)
+                    .read_to_end(&mut compressed)?;
+                let inflated = decompress(&compressed, global_comp, MAX_CATALOGUE_INFLATED)?;
+                entries = parse_catalog(&mut Cursor::new(inflated), format_major, global_comp)?;
+            } else {
+                entries = parse_catalog(&mut reader, format_major, global_comp)?;
+            }
         } else {
             return Err(DarError::Corrupt(format!(
                 "unknown slice-header extension {extension:#04x}"
@@ -207,6 +229,7 @@ impl<R: Read + Seek> DarReader<R> {
         Ok(Self {
             inner: reader,
             archive_origin,
+            format_major,
             entries,
         })
     }
@@ -251,6 +274,29 @@ impl<R: Read + Seek> DarReader<R> {
                 "'{path}' starts at {start}, past archive end {end}"
             )));
         }
+
+        // Format 1 stores no per-entry storage_size, so a compressed entry is a
+        // codec stream of unknown on-disk length (dar 1.x is gzip/zlib-only).
+        // Decode it straight from the archive — the decoder stops at the stream's
+        // natural end — bounded by the catalog `size`, rather than reading a
+        // fixed, synthesised length.
+        if self.format_major == 1 && is_compressed(entry.compression) {
+            self.inner.seek(SeekFrom::Start(start))?;
+            let out = read_bounded(
+                flate2::read::ZlibDecoder::new(&mut self.inner),
+                entry.size,
+                "zlib",
+            )?;
+            if out.len() as u64 != entry.size {
+                return Err(DarError::Corrupt(format!(
+                    "'{path}' decompressed to {} bytes but catalog declares {}",
+                    out.len(),
+                    entry.size
+                )));
+            }
+            return Ok(out);
+        }
+
         let available = end - start;
         if entry.stored_size > available {
             return Err(DarError::Corrupt(format!(
@@ -568,7 +614,11 @@ fn read_terminateur<R: Read + Seek>(r: &mut R) -> Result<u64, DarError> {
 ///
 /// Stops when the root directory is closed (depth reaches zero) or an unknown
 /// entry type is encountered (slice trailer).
-fn parse_catalog<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<Vec<EntryRef>, DarError> {
+fn parse_catalog<R: Read + Seek>(
+    r: &mut R,
+    format_major: u32,
+    global_comp: u8,
+) -> Result<Vec<EntryRef>, DarError> {
     let mut entries = Vec::new();
     let mut dir_stack: Vec<String> = Vec::new();
     let mut depth: u32 = 0;
@@ -613,21 +663,26 @@ fn parse_catalog<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<Vec<Ent
 
                 let size = read_infinint(r)?;
                 let archive_offset = read_infinint(r)?;
-                let mut stored_size = read_infinint(r)?;
-                // Format <= 7 has no per-file encryption/compression bytes and a
-                // fixed 2-byte CRC (no length prefix); format 8+ stores both bytes
-                // and a length-prefixed CRC (libdar cat_file.cpp:160-252, crc.cpp).
-                let (encryption_flag, compression) = if format_major >= 8 {
-                    (read_u8(r)?, read_u8(r)?)
-                } else {
-                    (0u8, b'n')
-                };
-                if format_major >= 8 {
+                // Per-entry layout differs by format (libdar cat_file.cpp / crc.cpp):
+                // - 8+: storage_size · enc(1) · comp(1) · length-prefixed CRC.
+                // - 2-7: storage_size · fixed 2-byte CRC; NO enc/comp byte — the
+                //   archive-global codec applies to every entry.
+                // - 1: size · offset only — no storage_size, CRC, or codec byte;
+                //   storage_size is synthesised and the global codec applies.
+                let (mut stored_size, encryption_flag, compression) = if format_major >= 8 {
+                    let ss = read_infinint(r)?;
+                    let enc = read_u8(r)?;
+                    let comp = read_u8(r)?;
                     let crc_size = read_infinint(r)?;
                     skip(r, crc_size)?;
-                } else {
+                    (ss, enc, comp)
+                } else if format_major >= 2 {
+                    let ss = read_infinint(r)?;
                     skip(r, 2)?; // fixed 2-byte CRC
-                }
+                    (ss, 0u8, global_comp)
+                } else {
+                    (size, 0u8, global_comp) // format 1: storage_size synthesised
+                };
                 // Pre-8: storage_size 0 means the data is stored uncompressed.
                 if format_major <= 7 && stored_size == 0 {
                     stored_size = size;
@@ -656,6 +711,16 @@ fn parse_catalog<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<Vec<Ent
                     skip_fsa(r)?;
                 }
                 skip_nul_string(r)?; // symlink target
+            }
+            'p' | 's' => {
+                // Named pipe (FIFO) / unix socket: a bare inode, no data and no
+                // type-specific fields. Skip it so catalog parsing continues past
+                // it to later files (real full-filesystem archives contain these).
+                let _name = read_nul_string(r)?;
+                let flags = read_inode_base(r, format_major)?;
+                if format_major >= 9 && (flags >> 4) & 1 != 0 {
+                    skip_fsa(r)?;
+                }
             }
             _ => break, // unknown type = slice trailer or unhandled entry
         }
@@ -792,7 +857,9 @@ fn skip_timestamp<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<(), Da
 ///   Each timestamp: see [`skip_timestamp`] (version-dependent).
 ///   FSA inode fields (format 9+ only): two infinints when (flags >> 4) & 1 == 1.
 fn read_inode_base<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<u8, DarError> {
-    let flags = read_u8(r)?;
+    // Format 1 predates extended attributes and has NO leading flag byte
+    // (libdar cat_inode.cpp); formats 2+ store it. Synthesise 0 for format 1.
+    let flags = if format_major >= 2 { read_u8(r)? } else { 0 };
     // uid/gid: 2-byte u16 for format <= 7 (libdar cat_inode.cpp:171), infinint for 8+.
     if format_major <= 7 {
         skip(r, 4)?; // uid (u16) + gid (u16)

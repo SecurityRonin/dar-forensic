@@ -974,8 +974,7 @@ fn edition1(comp: u8) -> (Vec<u8>, Vec<u8>) {
         e.finish().unwrap()
     };
     let content: Vec<u8> = if comp == b'z' {
-        std::iter::repeat(b"edition-1 payload 0123456789 ")
-            .take(40)
+        std::iter::repeat_n(b"edition-1 payload 0123456789 ", 40)
             .flatten()
             .copied()
             .collect()
@@ -1041,4 +1040,86 @@ fn v1_gzip_catalogue_lists_and_extracts() {
         ["root/hello.txt"]
     );
     assert_eq!(r.extract("root/hello.txt").expect("extract"), content);
+}
+
+/// A format-1 archive (gzip-global) whose single file `f` has the caller's
+/// on-disk `data` and declares uncompressed `size`. Catalogue + entry are both
+/// under the gzip global codec, so the entry decodes via the streaming path.
+fn edition1_compressed_entry(data: &[u8], size: u32) -> Vec<u8> {
+    use flate2::{write::ZlibEncoder, Compression};
+    use std::io::Write;
+    let zlib = |raw: &[u8]| {
+        let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
+        e.write_all(raw).unwrap();
+        e.finish().unwrap()
+    };
+    let mut cat = Vec::new();
+    cat.push(0x04);
+    cat.extend_from_slice(b"root\x00");
+    cat.extend(inode_v1());
+    cat.push(0x06);
+    cat.extend_from_slice(b"f\x00");
+    cat.extend(inode_v1());
+    cat.extend_from_slice(&inf(size));
+    cat.extend_from_slice(&inf(4)); // archive_offset
+    cat.push(EOD);
+    let cat_z = zlib(&cat);
+
+    let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b];
+    buf.extend_from_slice(b"0000000001");
+    buf.push(0x00);
+    buf.push(b'N');
+    buf.extend_from_slice(b"01\x00");
+    buf.push(b'z'); // global compression = gzip
+    buf.extend_from_slice(data); // entry data at offset 4
+    let cat_off = (4 + data.len()) as u32;
+    buf.extend_from_slice(&cat_z);
+    buf.extend_from_slice(&inf(cat_off));
+    buf.extend_from_slice(&[0x00, 0x00, 0x00, 0xc0]);
+    buf
+}
+
+#[test]
+fn v1_compressed_entry_malformed_returns_corrupt() {
+    let dar = edition1_compressed_entry(b"this is not a zlib stream!!", 100);
+    let mut r = DarReader::open(Cursor::new(dar)).expect("open");
+    let err = r.extract("root/f").unwrap_err();
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("zlib decode failed")));
+}
+
+#[test]
+fn v1_compressed_entry_size_mismatch_returns_corrupt() {
+    use flate2::{write::ZlibEncoder, Compression};
+    use std::io::Write;
+    let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
+    e.write_all(b"short").unwrap(); // decodes to 5 bytes
+    let blob = e.finish().unwrap();
+    let dar = edition1_compressed_entry(&blob, 100); // catalog claims 100
+    let mut r = DarReader::open(Cursor::new(dar)).expect("open");
+    let err = r.extract("root/f").unwrap_err();
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("declares")));
+}
+
+// ── special inode types (named pipe / socket) ─────────────────────────────────
+
+#[test]
+fn pipe_and_socket_entries_do_not_stop_parsing() {
+    // Real full-filesystem archives contain FIFOs ('p') and sockets ('s') — bare
+    // inodes with no data. The parser must skip them and keep reading later files
+    // rather than treating them as an unknown type and stopping. The pipe carries
+    // an FSA block (flag bit 0x10) to exercise the FSA skip in this arm.
+    let mut pipe = vec![0x10u8]; // cat_sig low5 0x10 → 'p'
+    pipe.extend_from_slice(b"fifo\x00");
+    pipe.extend(inode_base(true)); // FSA-full inode fields
+    pipe.extend_from_slice(&inf(264)); // FSA family tag
+    pipe.extend_from_slice(&inf(2)); // FSA data size
+    pipe.extend_from_slice(&[0xAA, 0xBB]); // FSA data
+    let mut sock = vec![0x13u8]; // cat_sig low5 0x13 → 's'
+    sock.extend_from_slice(b"sock\x00");
+    sock.extend(inode_base(false));
+
+    let dar = minimal_dar(vec![pipe, sock, file_entry("after.txt", 0, b'n', 0, 0)]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
+    assert_eq!(paths, ["after.txt"]);
 }
