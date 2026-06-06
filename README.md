@@ -37,6 +37,9 @@ for finding in reader.audit() {
     // e.g. [MEDIUM] DAR-PATH-TRAVERSAL: entry `../../etc/cron.d/x` contains a `..` …
     eprintln!("{finding}");
 }
+
+// Timeline export — write a Sleuth Kit bodyfile straight into `mactime`.
+reader.write_bodyfile(&mut std::io::stdout())?;
 # Ok::<(), dar_forensic::DarError>(())
 ```
 
@@ -53,6 +56,7 @@ DAR is a C++ format; the reference implementation (`libdar`) is GPL with C bindi
 | Transparent gzip / bzip2 / xz decompression | ✅ | ✅ — pure-Rust decoders, no C |
 | Tail-scan for 90+ GiB archives (≈107 MiB read, not 99 GiB) | — | ✅ |
 | Forensic anomaly audit (`audit()` → severity-graded findings) | — | ✅ — incomplete catalogue, path-traversal, undecodable codec, … (serde-exportable) |
+| Timeline export (Sleuth Kit bodyfile → `mactime`) | — | ✅ — `write_bodyfile()` straight from the catalogue |
 | Hardened against malicious input (no panic / OOM / backward seek) | — | ✅ |
 | Continuous fuzzing | — | ✅ `cargo fuzz` |
 | 100% line coverage, CI-enforced | — | ✅ |

@@ -8,6 +8,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Sleuth Kit bodyfile export.** `DarEntry::bodyfile()` renders one TSK
+  `mactime` line (`MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime`),
+  and `DarReader::write_bodyfile(&mut writer)` streams a line per catalogue
+  entry — so a DAR archive drops straight into a `mactime` timeline. The mode
+  field uses TSK's `type/type+perms` form (with setuid/setgid/sticky), symlink
+  targets are appended, and `|`/`\`/control bytes in names are escaped.
 - **`DarReader::audit()` — forensic anomaly detection.** Walks the parsed
   catalogue (no archive data read) and returns severity-graded `Anomaly`
   findings, most-severe first: incomplete catalogue, entries using a
