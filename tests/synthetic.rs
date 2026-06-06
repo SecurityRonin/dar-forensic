@@ -182,6 +182,7 @@ fn extract_unsupported_codec_returns_corrupt() {
     assert!(matches!(r.extract("data.lzo"), Err(DarError::Corrupt(_))));
 }
 
+#[cfg(feature = "gzip")]
 #[test]
 fn extract_compressed_size_mismatch_returns_corrupt() {
     // A real zlib stream of b"hello" (decodes to 5 bytes) embedded at
@@ -212,6 +213,7 @@ fn extract_compressed_size_mismatch_returns_corrupt() {
     assert!(matches!(&err, DarError::Corrupt(s) if s.contains("declares")));
 }
 
+#[cfg(feature = "gzip")]
 #[test]
 fn format_10_compressed_catalogue_lists_entries() {
     use flate2::{write::ZlibEncoder, Compression};
@@ -948,6 +950,7 @@ fn e2e_inplace_path_without_nul_is_length_capped() {
 /// A format-11.3 archive with a stored ('n') catalogue (so it lists) holding one
 /// entry whose data is the caller's `blob`, compressed with `comp`, declaring
 /// `declared_size` uncompressed bytes.
+#[cfg(any(feature = "gzip", feature = "xz"))]
 fn dar_with_compressed_entry(comp: u8, blob: &[u8], declared_size: u32) -> Vec<u8> {
     let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b];
     buf.extend_from_slice(&[0u8; 10]); // label
@@ -975,6 +978,7 @@ fn dar_with_compressed_entry(comp: u8, blob: &[u8], declared_size: u32) -> Vec<u
     buf
 }
 
+#[cfg(feature = "gzip")]
 #[test]
 fn e2e_gzip_entry_exceeding_declared_size_is_rejected() {
     use flate2::{write::ZlibEncoder, Compression};
@@ -988,6 +992,7 @@ fn e2e_gzip_entry_exceeding_declared_size_is_rejected() {
     assert!(matches!(&err, DarError::Corrupt(s) if s.contains("exceeds bound")));
 }
 
+#[cfg(feature = "xz")]
 #[test]
 fn e2e_xz_entry_exceeding_declared_size_is_rejected() {
     // Real xz stream of 200 'A' bytes; declared size 5 → BoundedWriter overflow.
@@ -1132,6 +1137,7 @@ fn v1_stored_lists_and_extracts() {
     assert_eq!(r.extract("root/hello.txt").expect("extract"), content);
 }
 
+#[cfg(feature = "gzip")]
 #[test]
 fn v1_gzip_catalogue_lists_and_extracts() {
     let (dar, content) = edition1(b'z');
@@ -1150,6 +1156,7 @@ fn v1_gzip_catalogue_lists_and_extracts() {
 /// A format-1 archive (gzip-global) whose single file `f` has the caller's
 /// on-disk `data` and declares uncompressed `size`. Catalogue + entry are both
 /// under the gzip global codec, so the entry decodes via the streaming path.
+#[cfg(feature = "gzip")]
 fn edition1_compressed_entry(data: &[u8], size: u32) -> Vec<u8> {
     use flate2::{write::ZlibEncoder, Compression};
     use std::io::Write;
@@ -1184,6 +1191,7 @@ fn edition1_compressed_entry(data: &[u8], size: u32) -> Vec<u8> {
     buf
 }
 
+#[cfg(feature = "gzip")]
 #[test]
 fn v1_compressed_entry_malformed_returns_corrupt() {
     let dar = edition1_compressed_entry(b"this is not a zlib stream!!", 100);
@@ -1192,6 +1200,7 @@ fn v1_compressed_entry_malformed_returns_corrupt() {
     assert!(matches!(&err, DarError::Corrupt(s) if s.contains("zlib decode failed")));
 }
 
+#[cfg(feature = "gzip")]
 #[test]
 fn v1_compressed_entry_size_mismatch_returns_corrupt() {
     use flate2::{write::ZlibEncoder, Compression};
@@ -1579,4 +1588,30 @@ fn entry_serializes_symlink_target_as_string() {
     );
     assert!(json.contains("\"kind\":\"Symlink\""), "{json}");
     assert!(json.contains("\"ctime\":null"), "{json}");
+}
+
+// ── lean build: a disabled codec is recognised, refused, and flagged ──────────
+
+/// In a build without the `gzip` feature, a gzip-compressed entry still LISTS
+/// (the catalogue here is stored), but extraction returns a clear error rather
+/// than wrong bytes, and `audit()` flags it as an unsupported codec. This is the
+/// secure-by-default lean reader contract: a codec you didn't compile in can
+/// never silently mis-decode.
+#[cfg(not(feature = "gzip"))]
+#[test]
+fn lean_build_recognises_refuses_and_flags_gzip_entry() {
+    let dar = minimal_dar(vec![file_entry("doc.z", 0, b'z', 0, 0)]);
+    let mut r = DarReader::open(Cursor::new(dar)).expect("stored catalogue lists without gzip");
+    assert_eq!(r.entries().len(), 1, "the gzip entry is still listed");
+
+    let err = r.extract("doc.z").unwrap_err();
+    assert!(
+        matches!(&err, DarError::Corrupt(s) if s.contains("not supported in this build")),
+        "{err:?}"
+    );
+
+    assert!(
+        r.audit().iter().any(|a| a.code == "DAR-CODEC-UNSUPPORTED"),
+        "audit must flag a gzip entry as unsupported when gzip is not compiled in"
+    );
 }

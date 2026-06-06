@@ -693,12 +693,17 @@ fn is_compressed(algo: u8) -> bool {
     )
 }
 
-/// The codec character if `algo` names a compression this reader recognises but
-/// cannot decode — lzo (`l`/`j`/`k`), zstd (`d`), or lz4 (`q`). Returns `None`
-/// for the decodable codecs (`z`/`y`/`x`) and for stored entries. The original
-/// case is preserved (uppercase = per-block) as evidence.
+/// The codec character if `algo` names a compression this build cannot decode:
+/// always lzo (`l`/`j`/`k`), zstd (`d`), lz4 (`q`), plus gzip/bzip2/xz when their
+/// feature is disabled. Returns `None` for a decodable codec or a stored entry.
+/// The original case is preserved (uppercase = per-block) as evidence.
 fn unsupported_codec(algo: u8) -> Option<char> {
-    matches!(algo.to_ascii_lowercase(), b'l' | b'j' | b'k' | b'd' | b'q').then_some(algo as char)
+    let lower = algo.to_ascii_lowercase();
+    let decodable = (cfg!(feature = "gzip") && lower == b'z')
+        || (cfg!(feature = "bzip2") && lower == b'y')
+        || (cfg!(feature = "xz") && lower == b'x');
+    let compressed = matches!(lower, b'z' | b'y' | b'x' | b'l' | b'j' | b'k' | b'd' | b'q');
+    (compressed && !decodable).then_some(algo as char)
 }
 
 /// Inflate a compressed catalogue into a single buffer, routing through the same
@@ -744,16 +749,27 @@ impl<W: Write> Write for CapWriter<'_, W> {
 /// char. The Read decoders stop at the codec stream's end (ignoring trailing
 /// bytes); lzma-rs rejects trailing bytes only after fully validating the
 /// stream, so that one error is treated as success.
+// `input`/`out` go unused when every codec is feature-disabled (the lean
+// reader); the match then has only the `other` arm, which errors.
+#[cfg_attr(
+    not(any(feature = "gzip", feature = "bzip2", feature = "xz")),
+    allow(unused_variables, clippy::needless_pass_by_value)
+)]
 fn decode_stream<R: Read, W: Write>(input: R, algo: u8, out: &mut W) -> Result<(), DarError> {
     match algo.to_ascii_lowercase() {
+        #[cfg(feature = "gzip")]
         b'z' => {
             std::io::copy(&mut flate2::read::ZlibDecoder::new(input), out)
                 .map_err(|e| DarError::Corrupt(format!("zlib decode failed: {e}")))?;
+            Ok(())
         }
+        #[cfg(feature = "bzip2")]
         b'y' => {
             std::io::copy(&mut bzip2_rs::DecoderReader::new(input), out)
                 .map_err(|e| DarError::Corrupt(format!("bzip2 decode failed: {e}")))?;
+            Ok(())
         }
+        #[cfg(feature = "xz")]
         b'x' => {
             let mut br = std::io::BufReader::new(input);
             match lzma_rs::xz_decompress(&mut br, out) {
@@ -762,15 +778,15 @@ fn decode_stream<R: Read, W: Write>(input: R, algo: u8, out: &mut W) -> Result<(
                     if m == "Unexpected data after last XZ block" => {}
                 Err(e) => return Err(DarError::Corrupt(format!("xz decode failed: {e}"))),
             }
+            Ok(())
         }
-        other => {
-            return Err(DarError::Corrupt(format!(
-                "unsupported compression '{}'",
-                other as char
-            )))
-        }
+        // A recognised codec whose feature is disabled (or a genuinely
+        // unsupported one) lands here — a clear error, never a silent misread.
+        other => Err(DarError::Corrupt(format!(
+            "compression '{}' is not supported in this build",
+            other as char
+        ))),
     }
-    Ok(())
 }
 
 /// Locate the catalogue in a pre-format-8 archive via the end `terminateur`
@@ -1559,6 +1575,7 @@ mod tests {
 
     // ── decode_stream / CapWriter ────────────────────────────────────────────
 
+    #[cfg(feature = "gzip")]
     #[test]
     fn decode_stream_caps_decompression_bomb() {
         use flate2::{write::ZlibEncoder, Compression};
@@ -1577,6 +1594,7 @@ mod tests {
         assert!(matches!(&err, DarError::Corrupt(s) if s.contains("exceeds bound")));
     }
 
+    #[cfg(feature = "gzip")]
     #[test]
     fn decode_stream_rejects_malformed_zlib() {
         let err = decode_stream(
@@ -1588,6 +1606,7 @@ mod tests {
         assert!(matches!(&err, DarError::Corrupt(s) if s.contains("zlib decode failed")));
     }
 
+    #[cfg(feature = "bzip2")]
     #[test]
     fn decode_stream_rejects_malformed_bzip2() {
         let err =
@@ -1595,6 +1614,7 @@ mod tests {
         assert!(matches!(&err, DarError::Corrupt(s) if s.contains("bzip2 decode failed")));
     }
 
+    #[cfg(feature = "xz")]
     #[test]
     fn decode_stream_rejects_malformed_xz() {
         let err = decode_stream(

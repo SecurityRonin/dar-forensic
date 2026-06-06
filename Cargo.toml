@@ -14,16 +14,25 @@ keywords    = ["forensics", "dar", "archive", "passware", "backup"]
 categories  = ["parser-implementations"]
 
 [features]
-# Derive `serde::Serialize` on the public `audit()` finding types (Severity,
-# AnomalyKind, Anomaly) for JSON/structured export. Off by default — the core
-# reader has zero serialization deps.
+# Transparent decompression codecs, all on by default. Opt out (e.g.
+# `default-features = false`) for a lean reader with zero codec dependencies —
+# enough to list and extract *stored* (uncompressed) archives, such as the
+# Passware Kit Mobile corpus. A codec left disabled is still recognised: such an
+# entry is listed and flagged by `audit()`, and `extract()` returns a clear
+# error rather than wrong bytes.
+default = ["gzip", "bzip2", "xz"]
+gzip = ["dep:flate2"]
+bzip2 = ["dep:bzip2-rs"]
+xz = ["dep:lzma-rs"]
+# Derive `serde::Serialize` on the public entry and `audit()` finding types for
+# JSON/structured export. Off by default — the core reader has no serde dep.
 serde = ["dep:serde"]
 
 [dependencies]
 thiserror = { workspace = true }
-flate2    = { workspace = true }
-bzip2-rs  = { workspace = true }
-lzma-rs   = { workspace = true }
+flate2    = { workspace = true, optional = true }
+bzip2-rs  = { workspace = true, optional = true }
+lzma-rs   = { workspace = true, optional = true }
 serde     = { workspace = true, optional = true }
 
 [dev-dependencies]
