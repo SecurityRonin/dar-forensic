@@ -194,6 +194,7 @@ File-specific catalog fields (after inode + optional FSA):
 [1]   compression_char           — 'n' = none
 [5]   crc_size        (infinint)
 [N]   crc_data        (crc_size bytes)
+```
 
 ---
 
@@ -367,7 +368,6 @@ is invisible when reading unencrypted archives.
 - **Format 10:** like 9 for extraction (tagged timestamps, FSA present), plus a
   not-saved `file_data_status` byte; **still no catalog in_place path** (that
   starts at 11.1).
-```
 
 ---
 
