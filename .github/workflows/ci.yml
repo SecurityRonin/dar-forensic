@@ -74,7 +74,10 @@ jobs:
         with:
           toolchain: nightly
           components: rust-src
-      - run: cargo install cargo-fuzz --locked
+      # Install without --locked: cargo-fuzz's pinned Cargo.lock holds an old
+      # rustix (0.36.x) whose `rustc_*` attributes current nightly rejects,
+      # breaking the build. Unlocking lets cargo resolve a rustix that compiles.
+      - run: cargo install cargo-fuzz
       - run: cargo fuzz build
 
   secrets:
