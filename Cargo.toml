@@ -1,6 +1,29 @@
+[package]
+name        = "dar-forensic"
+version     = "0.1.0"
+edition     = "2021"
+rust-version = "1.85"
+description = "Forensic-grade reader for Denis Corbin DAR (Disk ARchiver) archives, including the Passware Kit Mobile variant; hardened and fuzz-tested against malicious input."
+license     = "MIT"
+readme      = "README.md"
+repository  = "https://github.com/SecurityRonin/dar-forensic"
+homepage    = "https://github.com/SecurityRonin/dar-forensic"
+documentation = "https://docs.rs/dar-forensic"
+authors     = ["Albert Hui"]
+keywords    = ["forensics", "dar", "archive", "passware", "backup"]
+categories  = ["parser-implementations"]
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile  = { workspace = true }
+
+[lints]
+workspace = true
+
 [workspace]
 resolver = "2"
-members = ["dar"]
 
 [workspace.dependencies]
 thiserror = "2"
