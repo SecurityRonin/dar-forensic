@@ -390,7 +390,7 @@ impl<R: Read + Seek> DarReader<R> {
         }
 
         // Most-severe first; stable, so equal severities keep catalogue order.
-        anomalies.sort_by(|a, b| b.severity.cmp(&a.severity));
+        anomalies.sort_by_key(|a| std::cmp::Reverse(a.severity));
         anomalies
     }
 
