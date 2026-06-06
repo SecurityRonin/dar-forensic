@@ -8,13 +8,13 @@
 
 ## Licence
 
-dar is released under the [MIT Licence](https://github.com/SecurityRonin/dar-forensic/blob/main/LICENSE). You are free to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the software, subject to the licence terms.
+dar-forensic is released under the [MIT Licence](https://github.com/SecurityRonin/dar-forensic/blob/main/LICENSE). You are free to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the software, subject to the licence terms.
 
 ---
 
 ## Acceptable use
 
-dar is designed for lawful digital forensics, incident response, and backup inspection. You agree to use dar only for purposes that are legal in your jurisdiction.
+dar-forensic is designed for lawful digital forensics, incident response, and backup inspection. You agree to use dar-forensic only for purposes that are legal in your jurisdiction.
 
 Prohibited uses include but are not limited to:
 
@@ -25,13 +25,13 @@ Prohibited uses include but are not limited to:
 
 ## No warranty
 
-dar is provided **"as is"**, without warranty of any kind, express or implied. Security Ronin Ltd makes no representations regarding fitness for evidentiary, legal, or regulatory purposes. dar reads a vendor-extended, partly reverse-engineered archive format; verify critical results against an independent tool. Use in official proceedings is solely at the user's discretion and risk.
+dar-forensic is provided **"as is"**, without warranty of any kind, express or implied. Security Ronin Ltd makes no representations regarding fitness for evidentiary, legal, or regulatory purposes. dar-forensic reads a complex, partly reverse-engineered archive format; verify critical results against an independent tool. Use in official proceedings is solely at the user's discretion and risk.
 
 ---
 
 ## Limitation of liability
 
-To the maximum extent permitted by law, Security Ronin Ltd shall not be liable for any direct, indirect, incidental, special, or consequential damages arising out of the use or inability to use dar.
+To the maximum extent permitted by law, Security Ronin Ltd shall not be liable for any direct, indirect, incidental, special, or consequential damages arising out of the use or inability to use dar-forensic.
 
 ---
 
