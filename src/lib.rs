@@ -323,6 +323,19 @@ impl<R: Read + Seek> DarReader<R> {
         self.complete
     }
 
+    /// Extract a file by path, streaming its (decompressed) bytes to `out` and
+    /// returning the number of bytes written. Unlike [`extract`](Self::extract),
+    /// this never holds the whole file in memory, so it is safe for multi-GiB
+    /// entries (and composes with hashing, scanning, or writing to disk).
+    pub fn extract_to<P: AsRef<[u8]>, W: Write>(
+        &mut self,
+        path: P,
+        out: &mut W,
+    ) -> Result<u64, DarError> {
+        let _ = (path.as_ref(), out);
+        Err(DarError::Corrupt("extract_to not implemented".into()))
+    }
+
     /// Extract a file by path, returning its raw bytes.
     pub fn extract<P: AsRef<[u8]>>(&mut self, path: P) -> Result<Vec<u8>, DarError> {
         let path = path.as_ref();

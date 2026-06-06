@@ -474,3 +474,27 @@ fn v7_file_has_no_ctime() {
     // Pre-8 formats do not record ctime, so it must be None.
     assert_eq!(sole_file(&open_v7()).ctime, None);
 }
+
+// ── extract_to (streaming) ────────────────────────────────────────────────────
+
+#[test]
+fn extract_to_streams_stored_file() {
+    let mut r = open_v11();
+    let mut out = Vec::new();
+    let n = r
+        .extract_to("files/hello.txt", &mut out)
+        .expect("extract_to");
+    assert_eq!(out, b"hello corpus\n");
+    assert_eq!(n as usize, out.len());
+}
+
+#[test]
+fn extract_to_streams_decompressed() {
+    let mut r = open_fixture("v11_gzip.dar");
+    let mut out = Vec::new();
+    let n = r
+        .extract_to("payload.txt", &mut out)
+        .expect("extract_to gzip");
+    assert_eq!(out, expected_payload());
+    assert_eq!(n as usize, out.len());
+}
