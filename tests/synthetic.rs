@@ -180,13 +180,78 @@ fn extract_encrypted_entry_returns_corrupt() {
     assert!(matches!(r.extract("secret.bin"), Err(DarError::Corrupt(_))));
 }
 
-// ── extract: compressed ───────────────────────────────────────────────────────
+// ── extract: unsupported codec ────────────────────────────────────────────────
 
 #[test]
-fn extract_compressed_entry_returns_corrupt() {
-    let dar = minimal_dar(vec![file_entry("data.lzo", 0, b'z', 0, 0)]);
+fn extract_unsupported_codec_returns_corrupt() {
+    // lzo ('l') is a recognised dar compression algorithm this reader does not
+    // decode; extraction must fail loudly rather than return compressed bytes.
+    let dar = minimal_dar(vec![file_entry("data.lzo", 0, b'l', 0, 0)]);
     let mut r = DarReader::open(Cursor::new(dar)).expect("open");
     assert!(matches!(r.extract("data.lzo"), Err(DarError::Corrupt(_))));
+}
+
+#[test]
+fn extract_compressed_size_mismatch_returns_corrupt() {
+    // A real zlib stream of b"hello" (decodes to 5 bytes) embedded at
+    // archive_origin, but the catalog declares size = 10. extract() must reject
+    // the mismatch rather than return a short buffer.
+    const ZLIB_HELLO: [u8; 13] = [
+        0x78, 0xda, 0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x06, 0x2c, 0x02, 0x15,
+    ];
+    let mut buf = header(); // archive_origin = 21
+    buf.extend_from_slice(&ZLIB_HELLO); // file data at offset 0
+    buf.extend(catalog_open());
+    buf.extend(root_dir());
+    // file entry: gzip ('z'), archive_offset 0, stored_size 13, declared size 10.
+    let mut entry = vec![0x06u8]; // cat_sig → 'f'
+    entry.extend_from_slice(b"z.bin\x00");
+    entry.extend(inode_base(false));
+    entry.extend_from_slice(&inf(10)); // logical size (wrong on purpose)
+    entry.extend_from_slice(&inf(0)); // archive_offset
+    entry.extend_from_slice(&inf(ZLIB_HELLO.len() as u32)); // stored_size
+    entry.push(0x00); // not encrypted
+    entry.push(b'z'); // gzip
+    entry.extend_from_slice(&inf(0)); // crc_size
+    buf.extend(entry);
+    buf.push(EOD);
+
+    let mut r = DarReader::open(Cursor::new(buf)).expect("open");
+    let err = r.extract("z.bin").expect_err("size mismatch must error");
+    assert!(matches!(&err, DarError::Corrupt(s) if s.contains("declares")));
+}
+
+#[test]
+fn format_10_compressed_catalogue_lists_entries() {
+    use flate2::{write::ZlibEncoder, Compression};
+    use std::io::Write;
+
+    // A format-10 ("0:0") archive whose catalogue is gzip-compressed. Unlike the
+    // 11.3 fixtures this exercises the pre-11.1 branch (no in-place path after
+    // the catalog label) of the compressed-catalogue path.
+    const LBL: [u8; 10] = [0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA];
+
+    let mut cat = Vec::new();
+    cat.extend_from_slice(&LBL); // in-catalog label
+    cat.extend(root_dir());
+    cat.extend(file_entry("c.txt", 0, b'n', 0, 5));
+    cat.push(EOD);
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(&cat).unwrap();
+    let zcat = enc.finish().unwrap();
+
+    let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b]; // magic
+    buf.extend_from_slice(&LBL); // internal_name
+    buf.extend_from_slice(&[0x00, b'T']); // flag + TLV extension
+    buf.extend_from_slice(&inf(0)); // TLV count 0 → archive_origin
+    buf.extend_from_slice(b"0:0\x00"); // version string → format 10
+    buf.push(b'z'); // global compression = gzip
+    buf.extend_from_slice(&[0xAD, 0xFD, 0xEA, 0x77, 0x21, 0x43]); // seqt_catalogue
+    buf.extend_from_slice(&zcat); // compressed catalogue
+
+    let r = DarReader::open(Cursor::new(buf)).expect("open format-10 compressed");
+    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
+    assert_eq!(paths, ["c.txt"]);
 }
 
 // ── multiple files ────────────────────────────────────────────────────────────

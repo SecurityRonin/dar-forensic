@@ -348,7 +348,9 @@ fn gzip_lists_both_entries() {
 #[test]
 fn gzip_extracts_payload_roundtrip() {
     let mut r = open_fixture("v11_gzip.dar");
-    let data = r.extract("payload.txt").expect("extract gzip-compressed payload.txt");
+    let data = r
+        .extract("payload.txt")
+        .expect("extract gzip-compressed payload.txt");
     assert_eq!(data, expected_payload());
 }
 

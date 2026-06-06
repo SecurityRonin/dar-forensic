@@ -43,12 +43,18 @@
 //!
 //! Full format notes: `docs/implementation-notes.md`.
 
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use thiserror::Error;
 
 /// `00 00 00 7b` — DAR magic (SAUV_MAGIC_NUMBER = 123, big-endian u32).
 const DAR_MAGIC: [u8; 4] = [0x00, 0x00, 0x00, 0x7b];
+
+/// Upper bound on the compressed catalogue bytes read from the archive tail and
+/// on the inflated catalogue, guarding against a decompression bomb (per-file
+/// streams need no such constant — they are bounded by the entry's known size).
+const MAX_CATALOGUE_COMPRESSED: u64 = 512 * 1024 * 1024;
+const MAX_CATALOGUE_INFLATED: u64 = 1024 * 1024 * 1024;
 
 /// Escape sequence marking the catalog: `AD FD EA 77 21 43`.
 const SEQT_CATALOGUE: [u8; 6] = [0xAD, 0xFD, 0xEA, 0x77, 0x21, 0x43];
@@ -132,20 +138,45 @@ impl<R: Read + Seek> DarReader<R> {
 
             archive_origin = reader.stream_position()?;
             let format_value = read_format_value(&mut reader);
+            // The archive's global compression algorithm is the byte immediately
+            // after the version string; it tells us whether (and how) the
+            // catalogue stream is compressed. Unreadable → treat as stored.
+            let global_comp = read_u8(&mut reader).unwrap_or(b'n');
             reader.seek(SeekFrom::Start(archive_origin))?;
 
             // true → seqt_catalogue tape mark found (catalog has label + maybe path);
             // false → located by its ref_data_name label (tape marks off, e.g. Passware).
             let via_escape = find_catalogue(&mut reader, &label)?;
-            if via_escape {
-                skip(&mut reader, 10)?; // catalog label
-                                        // The in-place path exists only from format 11.1
-                                        // (catalogue.cpp:157). Formats 8/9/10/11.0 have none.
+            let format_major = format_value >> 8;
+            if via_escape && is_compressed(global_comp) {
+                // The catalogue is a single stream compressed with the archive
+                // codec, beginning right after the seqt_catalogue escape and
+                // running to the trailer. Inflate it, then parse from the
+                // plaintext buffer — which begins with the in-catalog label and
+                // optional in-place path, exactly like the uncompressed case.
+                let mut compressed = Vec::new();
+                reader
+                    .by_ref()
+                    .take(MAX_CATALOGUE_COMPRESSED)
+                    .read_to_end(&mut compressed)?;
+                let inflated = decompress(&compressed, global_comp, MAX_CATALOGUE_INFLATED)?;
+                let mut cur = Cursor::new(inflated);
+                skip(&mut cur, 10)?; // catalog label
                 if format_value >= FORMAT_11_1 {
-                    skip_nul_string(&mut reader)?;
+                    skip_nul_string(&mut cur)?;
                 }
+                entries = parse_catalog(&mut cur, format_major)?;
+            } else {
+                if via_escape {
+                    skip(&mut reader, 10)?; // catalog label
+                                            // The in-place path exists only from format 11.1
+                                            // (catalogue.cpp:157). Formats 8/9/10/11.0 have none.
+                    if format_value >= FORMAT_11_1 {
+                        skip_nul_string(&mut reader)?;
+                    }
+                }
+                entries = parse_catalog(&mut reader, format_major)?;
             }
-            entries = parse_catalog(&mut reader, format_value >> 8)?;
         } else if extension == b'N' || extension == b'S' {
             if extension == b'S' {
                 read_infinint(&mut reader)?; // slice size (multi-slice header); unused
@@ -201,12 +232,6 @@ impl<R: Read + Seek> DarReader<R> {
         if entry.encrypted {
             return Err(DarError::Corrupt(format!("'{path}' is encrypted")));
         }
-        if entry.compression != b'n' {
-            return Err(DarError::Corrupt(format!(
-                "'{}' uses unsupported compression '{}'",
-                path, entry.compression as char
-            )));
-        }
 
         // The raw bytes live at archive_origin + archive_offset.  Both fields
         // are attacker-controlled, so the sum must be checked, and the claimed
@@ -235,7 +260,22 @@ impl<R: Read + Seek> DarReader<R> {
         self.inner.seek(SeekFrom::Start(start))?;
         let mut data = vec![0u8; entry.stored_size as usize];
         self.inner.read_exact(&mut data)?;
-        Ok(data)
+
+        if !is_compressed(entry.compression) {
+            return Ok(data);
+        }
+        // Each compressed entry is an independent stream; its uncompressed length
+        // is the catalog `size`, so decode exactly that and reject any mismatch —
+        // a forged stream cannot over-inflate past the declared size.
+        let out = decompress(&data, entry.compression, entry.size)?;
+        if out.len() as u64 != entry.size {
+            return Err(DarError::Corrupt(format!(
+                "'{path}' decompressed to {} bytes but catalog declares {}",
+                out.len(),
+                entry.size
+            )));
+        }
+        Ok(out)
     }
 }
 
@@ -379,6 +419,43 @@ fn read_format_value<R: Read>(r: &mut R) -> u32 {
         major * 256 + fix
     } else {
         u32::MAX
+    }
+}
+
+/// True when a libdar compression char names a known compression algorithm.
+/// `compression2char` emits the algorithm letter in lowercase for streamed mode
+/// and uppercase for per-block mode (`z`=gzip, `y`=bzip2, `x`=xz, `l`/`j`/`k`=lzo
+/// variants, `d`=zstd, `q`=lz4); `n` is stored. Any other byte — e.g. a header
+/// placeholder in a non-dar-produced archive — is treated as not compressed, so
+/// the catalogue/entry is read verbatim rather than mis-decoded.
+fn is_compressed(algo: u8) -> bool {
+    matches!(
+        algo.to_ascii_lowercase(),
+        b'z' | b'y' | b'x' | b'l' | b'j' | b'k' | b'd' | b'q'
+    )
+}
+
+/// Inflate one compressed stream, dispatching on the libdar codec char and
+/// rejecting output longer than `max_out` (decompression-bomb guard). Trailing
+/// bytes after the stream (e.g. the archive trailer) are ignored by the decoder.
+fn decompress(data: &[u8], algo: u8, max_out: u64) -> Result<Vec<u8>, DarError> {
+    match algo.to_ascii_lowercase() {
+        b'z' => {
+            // dar's "gzip" is a raw zlib stream (78 xx), not a gzip (1f 8b) wrapper.
+            let mut out = Vec::new();
+            flate2::read::ZlibDecoder::new(data)
+                .take(max_out.saturating_add(1))
+                .read_to_end(&mut out)
+                .map_err(|e| DarError::Corrupt(format!("zlib decode failed: {e}")))?;
+            if out.len() as u64 > max_out {
+                return Err(DarError::Corrupt("decompressed data exceeds bound".into()));
+            }
+            Ok(out)
+        }
+        other => Err(DarError::Corrupt(format!(
+            "unsupported compression '{}'",
+            other as char
+        ))),
     }
 }
 
@@ -1045,5 +1122,25 @@ mod tests {
         c.seek(SeekFrom::Start(6)).unwrap();
         let err = find_catalogue(&mut c, &[0u8; 10]).unwrap_err();
         assert!(matches!(&err, DarError::Corrupt(s) if s == "archive body too short"));
+    }
+
+    // ── decompress ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn decompress_rejects_decompression_bomb() {
+        use flate2::{write::ZlibEncoder, Compression};
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&[0u8; 4096]).unwrap();
+        let blob = enc.finish().unwrap();
+        // Inflates to 4096 bytes but the caller caps output at 16.
+        let err = decompress(&blob, b'z', 16).unwrap_err();
+        assert!(matches!(&err, DarError::Corrupt(s) if s.contains("exceeds bound")));
+    }
+
+    #[test]
+    fn decompress_rejects_malformed_zlib() {
+        let err = decompress(b"not a zlib stream at all", b'z', 1024).unwrap_err();
+        assert!(matches!(&err, DarError::Corrupt(s) if s.contains("zlib decode failed")));
     }
 }
