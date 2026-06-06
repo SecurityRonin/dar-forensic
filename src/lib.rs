@@ -240,6 +240,25 @@ struct EntryRef {
     crc: Option<Vec<u8>>,
 }
 
+impl EntryRef {
+    /// Project the internal entry into the public [`DarEntry`] (one clone of the
+    /// owned path/target fields).
+    fn to_dar_entry(&self) -> DarEntry {
+        DarEntry {
+            path: self.path.clone(),
+            kind: self.kind,
+            size: self.size,
+            uid: self.uid,
+            gid: self.gid,
+            mode: self.mode,
+            atime: self.atime,
+            mtime: self.mtime,
+            ctime: self.ctime,
+            symlink_target: self.symlink_target.clone(),
+        }
+    }
+}
+
 /// Read-only DAR archive reader.
 pub struct DarReader<R: Read + Seek> {
     inner: R,
@@ -387,7 +406,7 @@ impl<R: Read + Seek> DarReader<R> {
     /// the entry list (cheap even for a multi-hundred-thousand-entry archive).
     #[must_use]
     pub fn entry_count(&self) -> usize {
-        0
+        self.entries.len()
     }
 
     /// Iterate the catalogue entries lazily, cloning one [`DarEntry`] at a time
@@ -396,26 +415,12 @@ impl<R: Read + Seek> DarReader<R> {
     /// entry in memory at once. Use [`entries`](Self::entries) when you want them
     /// all collected.
     pub fn iter_entries(&self) -> impl Iterator<Item = DarEntry> + '_ {
-        std::iter::empty()
+        self.entries.iter().map(EntryRef::to_dar_entry)
     }
 
     /// List all archived file entries (path and uncompressed size).
     pub fn entries(&self) -> Vec<DarEntry> {
-        self.entries
-            .iter()
-            .map(|e| DarEntry {
-                path: e.path.clone(),
-                kind: e.kind,
-                size: e.size,
-                uid: e.uid,
-                gid: e.gid,
-                mode: e.mode,
-                atime: e.atime,
-                mtime: e.mtime,
-                ctime: e.ctime,
-                symlink_target: e.symlink_target.clone(),
-            })
-            .collect()
+        self.iter_entries().collect()
     }
 
     /// Whether the catalog was parsed to a clean end.
@@ -496,7 +501,7 @@ impl<R: Read + Seek> DarReader<R> {
     /// entry, newline-terminated — to `out`, for feeding TSK's `mactime` timeline
     /// tool. Pure metadata over the parsed catalogue; no archive data is read.
     pub fn write_bodyfile<W: Write>(&self, out: &mut W) -> std::io::Result<()> {
-        for entry in self.entries() {
+        for entry in self.iter_entries() {
             writeln!(out, "{}", entry.bodyfile())?;
         }
         Ok(())
