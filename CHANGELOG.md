@@ -8,6 +8,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Optional compression codecs (`gzip` / `bzip2` / `xz`), all on by default.**
+  Build with `default-features = false` for a lean reader carrying zero codec
+  dependencies — enough to list and extract *stored* archives (e.g. the
+  uncompressed Passware Kit Mobile corpus) with a much smaller supply-chain
+  surface. A codec left disabled is still recognised: such an entry is listed
+  and flagged by `audit()`, and `extract()` returns a clear "not supported in
+  this build" error rather than ever mis-reading compressed data as stored.
 - **Sleuth Kit bodyfile export.** `DarEntry::bodyfile()` renders one TSK
   `mactime` line (`MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime`),
   and `DarReader::write_bodyfile(&mut writer)` streams a line per catalogue

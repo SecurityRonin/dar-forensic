@@ -85,6 +85,7 @@ The format version is the header `version_string`, each byte `value + 48` (`"090
 
 - **Read-only** — does not create or modify archives.
 - **Decompression: gzip, bzip2, xz** — these are transparently inflated for both the compressed catalog and extracted entry data (pure-Rust decoders, bounded against decompression bombs). Archives using lzo, zstd or lz4 are recognised but not yet decoded; encrypted entries are *listed* but `extract()` returns a clear error rather than wrong bytes — decryption is out of scope.
+- **Lean build** — the three codecs are default-on Cargo features (`gzip`, `bzip2`, `xz`). For a reader of *stored* archives (e.g. the uncompressed Passware corpus) with zero codec dependencies, build with `default-features = false`. A codec you leave out is still recognised: its entries list and are flagged by `audit()`, and `extract()` refuses them rather than mis-decoding.
 - **CRC fields are parsed but not yet verified** — the stored per-file CRC is located and skipped; integrity verification against it is not implemented.
 
 ## Security
