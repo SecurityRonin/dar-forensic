@@ -79,21 +79,75 @@ pub enum DarError {
     EntryNotFound(String),
 }
 
-/// Metadata about one archived file.
+/// The kind of filesystem object a catalog entry describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    File,
+    Directory,
+    Symlink,
+    NamedPipe,
+    Socket,
+    CharDevice,
+    BlockDevice,
+    Hardlink,
+    /// A catalog entry type this reader does not model (the raw `cat_sig` letter).
+    Unknown(char),
+}
+
+/// Metadata about one archived filesystem object.
+///
+/// Paths and symlink targets are exposed as raw bytes — DAR (like the
+/// filesystems it archives) does not guarantee UTF-8, and a forensic reader
+/// must never lose or reject a byte-exact name. Use [`DarEntry::path_lossy`] for
+/// display.
 #[derive(Debug, Clone)]
 pub struct DarEntry {
-    pub path: String,
+    /// Path as stored, raw bytes — may not be valid UTF-8.
+    pub path: Vec<u8>,
+    /// What kind of filesystem object this entry describes.
+    pub kind: EntryKind,
+    /// Uncompressed size in bytes (0 for entries with no data).
     pub size: u64,
+    /// Owner user id.
+    pub uid: u64,
+    /// Owner group id.
+    pub gid: u64,
+    /// Permission bits (the low bits of the mode).
+    pub mode: u16,
+    /// Access time, seconds since the Unix epoch.
+    pub atime: i64,
+    /// Modification time, seconds since the Unix epoch.
+    pub mtime: i64,
+    /// Status-change time, seconds since the Unix epoch; `None` for formats
+    /// before 8, which do not record it.
+    pub ctime: Option<i64>,
+    /// Target of a symbolic link, raw bytes; `None` for non-symlinks.
+    pub symlink_target: Option<Vec<u8>>,
+}
+
+impl DarEntry {
+    /// The path decoded as lossy UTF-8 (invalid byte sequences become U+FFFD).
+    #[must_use]
+    pub fn path_lossy(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.path)
+    }
 }
 
 #[derive(Debug, Clone)]
 struct EntryRef {
-    path: String,
+    path: Vec<u8>,
+    kind: EntryKind,
     size: u64,
+    uid: u64,
+    gid: u64,
+    mode: u16,
+    atime: i64,
+    mtime: i64,
+    ctime: Option<i64>,
+    symlink_target: Option<Vec<u8>>,
     archive_offset: u64,
     stored_size: u64,
     compression: u8,
-    encrypted: bool,
 }
 
 /// Read-only DAR archive reader.
@@ -240,23 +294,29 @@ impl<R: Read + Seek> DarReader<R> {
             .iter()
             .map(|e| DarEntry {
                 path: e.path.clone(),
+                kind: e.kind,
                 size: e.size,
+                uid: e.uid,
+                gid: e.gid,
+                mode: e.mode,
+                atime: e.atime,
+                mtime: e.mtime,
+                ctime: e.ctime,
+                symlink_target: e.symlink_target.clone(),
             })
             .collect()
     }
 
     /// Extract a file by path, returning its raw bytes.
-    pub fn extract(&mut self, path: &str) -> Result<Vec<u8>, DarError> {
+    pub fn extract<P: AsRef<[u8]>>(&mut self, path: P) -> Result<Vec<u8>, DarError> {
+        let path = path.as_ref();
+        let name = String::from_utf8_lossy(path);
         let entry = self
             .entries
             .iter()
-            .find(|e| e.path == path)
-            .ok_or_else(|| DarError::EntryNotFound(path.to_string()))?
+            .find(|e| e.path.as_slice() == path)
+            .ok_or_else(|| DarError::EntryNotFound(name.clone().into_owned()))?
             .clone();
-
-        if entry.encrypted {
-            return Err(DarError::Corrupt(format!("'{path}' is encrypted")));
-        }
 
         // The raw bytes live at archive_origin + archive_offset.  Both fields
         // are attacker-controlled, so the sum must be checked, and the claimed
@@ -266,12 +326,12 @@ impl<R: Read + Seek> DarReader<R> {
             .archive_origin
             .checked_add(entry.archive_offset)
             .ok_or_else(|| {
-                DarError::Corrupt(format!("'{path}' archive offset overflows file position"))
+                DarError::Corrupt(format!("'{name}' archive offset overflows file position"))
             })?;
         let end = self.inner.seek(SeekFrom::End(0))?;
         if start > end {
             return Err(DarError::Corrupt(format!(
-                "'{path}' starts at {start}, past archive end {end}"
+                "'{name}' starts at {start}, past archive end {end}"
             )));
         }
 
@@ -289,7 +349,7 @@ impl<R: Read + Seek> DarReader<R> {
             )?;
             if out.len() as u64 != entry.size {
                 return Err(DarError::Corrupt(format!(
-                    "'{path}' decompressed to {} bytes but catalog declares {}",
+                    "'{name}' decompressed to {} bytes but catalog declares {}",
                     out.len(),
                     entry.size
                 )));
@@ -300,7 +360,7 @@ impl<R: Read + Seek> DarReader<R> {
         let available = end - start;
         if entry.stored_size > available {
             return Err(DarError::Corrupt(format!(
-                "'{path}' claims {} stored bytes but only {available} remain",
+                "'{name}' claims {} stored bytes but only {available} remain",
                 entry.stored_size
             )));
         }
@@ -318,7 +378,7 @@ impl<R: Read + Seek> DarReader<R> {
         let out = decompress(&data, entry.compression, entry.size)?;
         if out.len() as u64 != entry.size {
             return Err(DarError::Corrupt(format!(
-                "'{path}' decompressed to {} bytes but catalog declares {}",
+                "'{name}' decompressed to {} bytes but catalog declares {}",
                 out.len(),
                 entry.size
             )));
@@ -455,8 +515,7 @@ fn find_catalogue_within<R: Read + Seek>(
 /// 0); format 8+ stores `"NNf"`. Returns `u32::MAX` for an unreadable string so
 /// an unknown future format is treated as newest.
 fn read_format_value<R: Read>(r: &mut R) -> u32 {
-    let s = read_nul_string(r).unwrap_or_default();
-    let b = s.as_bytes();
+    let b = read_nul_bytes(r).unwrap_or_default();
     if b.len() >= 2 {
         let major = u32::from(b[0].saturating_sub(48)) * 256 + u32::from(b[1].saturating_sub(48));
         let fix = if b.len() >= 3 {
@@ -620,7 +679,7 @@ fn parse_catalog<R: Read + Seek>(
     global_comp: u8,
 ) -> Result<Vec<EntryRef>, DarError> {
     let mut entries = Vec::new();
-    let mut dir_stack: Vec<String> = Vec::new();
+    let mut dir_stack: Vec<Vec<u8>> = Vec::new();
     let mut depth: u32 = 0;
 
     loop {
@@ -643,90 +702,153 @@ fn parse_catalog<R: Read + Seek>(
                 }
             }
             'd' => {
-                let name = read_nul_string(r)?;
-                let flags = read_inode_base(r, format_major)?;
-                if format_major >= 9 && (flags >> 4) & 1 != 0 {
+                let name = read_nul_bytes(r)?;
+                let inode = read_inode_base(r, format_major)?;
+                if format_major >= 9 && (inode.flags >> 4) & 1 != 0 {
                     skip_fsa(r)?;
                 }
+                let is_root = depth == 0;
                 depth += 1;
-                // <ROOT> is a virtual root; don't include it in file paths.
-                if name != "<ROOT>" {
+                // The archive root (`<ROOT>`, or `"root"` in formats 1/9) is a
+                // virtual node: `<ROOT>` is dropped entirely; a named root becomes
+                // the path prefix. Neither is listed as an entry. Real
+                // sub-directories are listed with their full path.
+                if name != b"<ROOT>" {
+                    let path = join_path(&dir_stack, &name);
+                    if !is_root {
+                        entries.push(meta_entry(path, EntryKind::Directory, &inode, None));
+                    }
                     dir_stack.push(name);
                 }
             }
             'f' => {
-                let name = read_nul_string(r)?;
-                let flags = read_inode_base(r, format_major)?;
-                if format_major >= 9 && (flags >> 4) & 1 != 0 {
+                let name = read_nul_bytes(r)?;
+                let inode = read_inode_base(r, format_major)?;
+                if format_major >= 9 && (inode.flags >> 4) & 1 != 0 {
                     skip_fsa(r)?;
                 }
 
-                let size = read_infinint(r)?;
-                let archive_offset = read_infinint(r)?;
-                // Per-entry layout differs by format (libdar cat_file.cpp / crc.cpp):
-                // - 8+: storage_size · enc(1) · comp(1) · length-prefixed CRC.
-                // - 2-7: storage_size · fixed 2-byte CRC; NO enc/comp byte — the
-                //   archive-global codec applies to every entry.
-                // - 1: size · offset only — no storage_size, CRC, or codec byte;
-                //   storage_size is synthesised and the global codec applies.
-                let (mut stored_size, encryption_flag, compression) = if format_major >= 8 {
-                    let ss = read_infinint(r)?;
-                    let enc = read_u8(r)?;
-                    let comp = read_u8(r)?;
-                    let crc_size = read_infinint(r)?;
-                    skip(r, crc_size)?;
-                    (ss, enc, comp)
-                } else if format_major >= 2 {
-                    let ss = read_infinint(r)?;
-                    skip(r, 2)?; // fixed 2-byte CRC
-                    (ss, 0u8, global_comp)
-                } else {
-                    (size, 0u8, global_comp) // format 1: storage_size synthesised
-                };
-                // Pre-8: storage_size 0 means the data is stored uncompressed.
-                if format_major <= 7 && stored_size == 0 {
-                    stored_size = size;
-                }
-
-                let path = if dir_stack.is_empty() {
-                    name
-                } else {
-                    format!("{}/{}", dir_stack.join("/"), name)
-                };
+                let (size, archive_offset, stored_size, compression) =
+                    read_file_fields(r, format_major, global_comp)?;
 
                 entries.push(EntryRef {
-                    path,
+                    path: join_path(&dir_stack, &name),
+                    kind: EntryKind::File,
                     size,
+                    uid: inode.uid,
+                    gid: inode.gid,
+                    mode: inode.mode,
+                    atime: inode.atime,
+                    mtime: inode.mtime,
+                    ctime: inode.ctime,
+                    symlink_target: None,
                     archive_offset,
                     stored_size,
                     compression,
-                    encrypted: encryption_flag != 0,
                 });
             }
             'l' => {
-                // Symbolic link: inode + NUL-terminated target path; not extractable.
-                let _name = read_nul_string(r)?;
-                let flags = read_inode_base(r, format_major)?;
-                if format_major >= 9 && (flags >> 4) & 1 != 0 {
+                // Symbolic link: inode + NUL-terminated target path.
+                let name = read_nul_bytes(r)?;
+                let inode = read_inode_base(r, format_major)?;
+                if format_major >= 9 && (inode.flags >> 4) & 1 != 0 {
                     skip_fsa(r)?;
                 }
-                skip_nul_string(r)?; // symlink target
+                let target = read_nul_bytes(r)?;
+                let path = join_path(&dir_stack, &name);
+                entries.push(meta_entry(path, EntryKind::Symlink, &inode, Some(target)));
             }
             'p' | 's' => {
                 // Named pipe (FIFO) / unix socket: a bare inode, no data and no
-                // type-specific fields. Skip it so catalog parsing continues past
-                // it to later files (real full-filesystem archives contain these).
-                let _name = read_nul_string(r)?;
-                let flags = read_inode_base(r, format_major)?;
-                if format_major >= 9 && (flags >> 4) & 1 != 0 {
+                // type-specific fields.
+                let name = read_nul_bytes(r)?;
+                let inode = read_inode_base(r, format_major)?;
+                if format_major >= 9 && (inode.flags >> 4) & 1 != 0 {
                     skip_fsa(r)?;
                 }
+                let kind = if entry_type == 'p' {
+                    EntryKind::NamedPipe
+                } else {
+                    EntryKind::Socket
+                };
+                entries.push(meta_entry(join_path(&dir_stack, &name), kind, &inode, None));
             }
             _ => break, // unknown type = slice trailer or unhandled entry
         }
     }
 
     Ok(entries)
+}
+
+/// Read the file-specific catalog fields after the inode and return
+/// `(size, archive_offset, stored_size, compression)`. Layout differs by format
+/// (libdar cat_file.cpp / crc.cpp):
+/// - 8+: storage_size · file_data_status(1) · comp(1) · length-prefixed CRC.
+/// - 2-7: storage_size · fixed 2-byte CRC; no status/comp byte — the
+///   archive-global codec applies.
+/// - 1: size · offset only; storage_size synthesised, global codec applies.
+fn read_file_fields<R: Read + Seek>(
+    r: &mut R,
+    format_major: u32,
+    global_comp: u8,
+) -> Result<(u64, u64, u64, u8), DarError> {
+    let size = read_infinint(r)?;
+    let archive_offset = read_infinint(r)?;
+    let (mut stored_size, compression) = if format_major >= 8 {
+        let ss = read_infinint(r)?;
+        let _file_data_status = read_u8(r)?;
+        let comp = read_u8(r)?;
+        let crc_size = read_infinint(r)?;
+        skip(r, crc_size)?;
+        (ss, comp)
+    } else if format_major >= 2 {
+        let ss = read_infinint(r)?;
+        skip(r, 2)?; // fixed 2-byte CRC
+        (ss, global_comp)
+    } else {
+        (size, global_comp) // format 1: storage_size synthesised
+    };
+    // Pre-8: storage_size 0 means the data is stored uncompressed.
+    if format_major <= 7 && stored_size == 0 {
+        stored_size = size;
+    }
+    Ok((size, archive_offset, stored_size, compression))
+}
+
+/// Join a directory stack and a leaf name into a `/`-separated raw-byte path.
+fn join_path(stack: &[Vec<u8>], name: &[u8]) -> Vec<u8> {
+    let mut path = Vec::new();
+    for component in stack {
+        path.extend_from_slice(component);
+        path.push(b'/');
+    }
+    path.extend_from_slice(name);
+    path
+}
+
+/// Build an `EntryRef` for a non-file inode (dir/symlink/pipe/socket): it carries
+/// metadata but no archive data.
+fn meta_entry(
+    path: Vec<u8>,
+    kind: EntryKind,
+    inode: &Inode,
+    symlink_target: Option<Vec<u8>>,
+) -> EntryRef {
+    EntryRef {
+        path,
+        kind,
+        size: 0,
+        uid: inode.uid,
+        gid: inode.gid,
+        mode: inode.mode,
+        atime: inode.atime,
+        mtime: inode.mtime,
+        ctime: inode.ctime,
+        symlink_target,
+        archive_offset: 0,
+        stored_size: 0,
+        compression: b'n',
+    }
 }
 
 // ── Low-level I/O helpers ─────────────────────────────────────────────────────
@@ -783,8 +905,10 @@ fn read_u8<R: Read>(r: &mut R) -> Result<u8, DarError> {
 /// growing the buffer until EOF (or OOM on a multi-GiB stream).
 const MAX_NUL_STRING: usize = 64 * 1024;
 
-/// Read a NUL-terminated UTF-8 string, consuming the NUL byte.
-fn read_nul_string<R: Read>(r: &mut R) -> Result<String, DarError> {
+/// Read a NUL-terminated byte string (raw, not UTF-8 validated), consuming the
+/// NUL. Length-capped at `MAX_NUL_STRING` so a NUL-free hostile region can't grow
+/// the buffer to EOF.
+fn read_nul_bytes<R: Read>(r: &mut R) -> Result<Vec<u8>, DarError> {
     let mut bytes = Vec::new();
     loop {
         let b = read_u8(r)?;
@@ -798,7 +922,7 @@ fn read_nul_string<R: Read>(r: &mut R) -> Result<String, DarError> {
         }
         bytes.push(b);
     }
-    String::from_utf8(bytes).map_err(|e| DarError::Corrupt(e.to_string()))
+    Ok(bytes)
 }
 
 /// Skip a NUL-terminated string without collecting the bytes.
@@ -835,52 +959,79 @@ fn skip<R: Seek>(r: &mut R, n: u64) -> Result<(), DarError> {
 /// Timestamps are prefixed with a type byte:
 /// - `'s'` (0x73) and others: seconds only — one infinint follows
 /// - `'n'` (0x6e): nanosecond precision — two infinints follow (seconds + nanoseconds)
-fn skip_timestamp<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<(), DarError> {
+fn read_timestamp<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<i64, DarError> {
     // Format 8 and earlier store a bare seconds infinint with NO precision byte
     // (libdar datetime.cpp:372). Format 9+ prefix a unit byte ('s' seconds,
-    // 'u' microsecond, 'n' nanosecond); sub-second units add a second infinint.
+    // 'u' microsecond, 'n' nanosecond); sub-second units add a second infinint,
+    // which we read and discard (seconds resolution is what we expose).
     if format_major < 9 {
-        read_infinint(r)?;
-        return Ok(());
+        return Ok(read_infinint(r)? as i64);
     }
     let ts_type = read_u8(r)?;
-    read_infinint(r)?;
+    let secs = read_infinint(r)? as i64;
     if ts_type == b'n' || ts_type == b'u' {
         read_infinint(r)?;
     }
-    Ok(())
+    Ok(secs)
 }
 
-/// Read the inode flags byte and seek past the remaining inode fields.
-///
-/// Base layout: flags(1) + uid(inf) + gid(inf) + perms(2) + 3 timestamps
-///   Each timestamp: see [`skip_timestamp`] (version-dependent).
-///   FSA inode fields (format 9+ only): two infinints when (flags >> 4) & 1 == 1.
-fn read_inode_base<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<u8, DarError> {
+/// Read a 2-byte big-endian `u16` (uid/gid for format <= 7, and permission bits).
+fn read_u16<R: Read>(r: &mut R) -> Result<u16, DarError> {
+    let mut b = [0u8; 2];
+    r.read_exact(&mut b)?;
+    Ok(u16::from_be_bytes(b))
+}
+
+/// Decoded inode metadata shared by every catalog entry type.
+struct Inode {
+    flags: u8,
+    uid: u64,
+    gid: u64,
+    mode: u16,
+    atime: i64,
+    mtime: i64,
+    ctime: Option<i64>,
+}
+
+/// Read one inode's base fields and return them. Layout in order: an optional
+/// flags byte (format 2+), uid, gid, a `u16` perms field, atime, mtime, and a
+/// ctime for format 8+. uid/gid are a 2-byte `u16` for format `<= 7` and an
+/// infinint for 8+; each timestamp is decoded by [`read_timestamp`]. FSA inode
+/// fields (format 9+, when flag bit `0x10` is set) are consumed and discarded.
+fn read_inode_base<R: Read + Seek>(r: &mut R, format_major: u32) -> Result<Inode, DarError> {
     // Format 1 predates extended attributes and has NO leading flag byte
     // (libdar cat_inode.cpp); formats 2+ store it. Synthesise 0 for format 1.
     let flags = if format_major >= 2 { read_u8(r)? } else { 0 };
     // uid/gid: 2-byte u16 for format <= 7 (libdar cat_inode.cpp:171), infinint for 8+.
-    if format_major <= 7 {
-        skip(r, 4)?; // uid (u16) + gid (u16)
+    let (uid, gid) = if format_major <= 7 {
+        (u64::from(read_u16(r)?), u64::from(read_u16(r)?))
     } else {
-        read_infinint(r)?; // uid
-        read_infinint(r)?; // gid
-    }
-    skip(r, 2)?; // perms (always a 2-byte big-endian u16, never an infinint)
-    skip_timestamp(r, format_major)?; // atime
-    skip_timestamp(r, format_major)?; // mtime
-                                      // ctime (last_cha) exists only from format 8 (libdar cat_inode.cpp:197).
-    if format_major >= 8 {
-        skip_timestamp(r, format_major)?;
-    }
+        (read_infinint(r)?, read_infinint(r)?)
+    };
+    let mode = read_u16(r)?; // perms: a 2-byte big-endian u16, never an infinint
+    let atime = read_timestamp(r, format_major)?;
+    let mtime = read_timestamp(r, format_major)?;
+    // ctime (last_cha) exists only from format 8 (libdar cat_inode.cpp:197).
+    let ctime = if format_major >= 8 {
+        Some(read_timestamp(r, format_major)?)
+    } else {
+        None
+    };
     // FSA inode fields exist only from format 9 (libdar cat_inode.cpp:264); bit
     // 0x10 is the FSA-full status. Formats <= 8 have no FSA.
     if format_major >= 9 && (flags >> 4) & 1 != 0 {
         read_infinint(r)?;
         read_infinint(r)?;
     }
-    Ok(flags)
+    Ok(Inode {
+        flags,
+        uid,
+        gid,
+        mode,
+        atime,
+        mtime,
+        ctime,
+    })
 }
 
 /// Skip one FSA (filesystem attributes) block.
@@ -955,28 +1106,30 @@ mod tests {
         assert!(matches!(err, DarError::Io(_)));
     }
 
-    // ── read_nul_string ───────────────────────────────────────────────────────
+    // ── read_nul_bytes ──────────────────────────────────────────────────────
 
     #[test]
-    fn nul_string_reads_until_nul() {
+    fn nul_bytes_reads_until_nul() {
         let data = b"hello\x00world";
         assert_eq!(
-            read_nul_string(&mut Cursor::new(&data[..])).unwrap(),
-            "hello"
+            read_nul_bytes(&mut Cursor::new(&data[..])).unwrap(),
+            b"hello"
         );
     }
 
     #[test]
-    fn nul_string_invalid_utf8_returns_corrupt() {
-        // 0xFF 0x80 is not valid UTF-8; 0x00 terminates.
+    fn nul_bytes_preserves_non_utf8() {
+        // Raw bytes are kept verbatim — a non-UTF-8 name must NOT be rejected.
         let data = [0xFF, 0x80, 0x00];
-        let err = read_nul_string(&mut Cursor::new(&data[..])).unwrap_err();
-        assert!(matches!(err, DarError::Corrupt(_)));
+        assert_eq!(
+            read_nul_bytes(&mut Cursor::new(&data[..])).unwrap(),
+            vec![0xFF, 0x80]
+        );
     }
 
     #[test]
-    fn nul_string_eof_before_nul_returns_io() {
-        let err = read_nul_string(&mut Cursor::new(b"no-nul".to_vec())).unwrap_err();
+    fn nul_bytes_eof_before_nul_returns_io() {
+        let err = read_nul_bytes(&mut Cursor::new(b"no-nul".to_vec())).unwrap_err();
         assert!(matches!(err, DarError::Io(_)));
     }
 
@@ -1069,7 +1222,7 @@ mod tests {
         }
         data.push(0xFF); // sentinel — must not be consumed
         let mut c = Cursor::new(data);
-        assert_eq!(read_inode_base(&mut c, 11).unwrap(), 0x00);
+        assert_eq!(read_inode_base(&mut c, 11).unwrap().flags, 0x00);
         assert_eq!(c.position(), 31);
     }
 
@@ -1088,7 +1241,7 @@ mod tests {
         data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00]); // field9
         data.push(0xFF); // sentinel
         let mut c = Cursor::new(data);
-        assert_eq!(read_inode_base(&mut c, 11).unwrap(), 0x10);
+        assert_eq!(read_inode_base(&mut c, 11).unwrap().flags, 0x10);
         assert_eq!(c.position(), 41);
     }
 
@@ -1144,11 +1297,11 @@ mod tests {
     // ── hardening: unbounded NUL-terminated strings ───────────────────────────
 
     #[test]
-    fn nul_string_without_terminator_is_length_bounded() {
+    fn nul_bytes_without_terminator_is_length_bounded() {
         // No NUL in 200 KiB of data: must be rejected once the path cap is hit,
         // not grow the buffer until EOF (or OOM on a multi-GiB stream).
         let data = vec![b'A'; 200_000];
-        let err = read_nul_string(&mut Cursor::new(data)).unwrap_err();
+        let err = read_nul_bytes(&mut Cursor::new(data)).unwrap_err();
         assert!(matches!(err, DarError::Corrupt(_)), "got {err:?}");
     }
 

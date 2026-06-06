@@ -11,7 +11,7 @@ fn main() {
     let entries = dar.entries();
     println!("{} entries", entries.len());
     for e in entries.iter().take(10) {
-        println!("  {} ({} bytes)", e.path, e.size);
+        println!("  {:?}  {}  ({} bytes)", e.kind, e.path_lossy(), e.size);
     }
     if entries.len() > 10 {
         println!("  ... ({} more)", entries.len() - 10);

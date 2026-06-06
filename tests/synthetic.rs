@@ -4,7 +4,7 @@
 //! specific code path that real archive fixtures cannot reach.  No on-disk
 //! files are required.
 
-use dar_forensic::{DarError, DarReader};
+use dar_forensic::{DarError, DarReader, EntryKind};
 use std::io::Cursor;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -171,15 +171,6 @@ fn no_catalog_escape_returns_corrupt() {
     ));
 }
 
-// ── extract: encrypted ────────────────────────────────────────────────────────
-
-#[test]
-fn extract_encrypted_entry_returns_corrupt() {
-    let dar = minimal_dar(vec![file_entry("secret.bin", 1, b'n', 0, 0)]);
-    let mut r = DarReader::open(Cursor::new(dar)).expect("open");
-    assert!(matches!(r.extract("secret.bin"), Err(DarError::Corrupt(_))));
-}
-
 // ── extract: unsupported codec ────────────────────────────────────────────────
 
 #[test]
@@ -250,7 +241,11 @@ fn format_10_compressed_catalogue_lists_entries() {
     buf.extend_from_slice(&zcat); // compressed catalogue
 
     let r = DarReader::open(Cursor::new(buf)).expect("open format-10 compressed");
-    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
+    let paths: Vec<_> = r
+        .entries()
+        .into_iter()
+        .map(|e| e.path_lossy().into_owned())
+        .collect();
     assert_eq!(paths, ["c.txt"]);
 }
 
@@ -263,7 +258,11 @@ fn two_files_both_listed() {
         file_entry("b.txt", 0, b'n', 0, 0),
     ]);
     let r = DarReader::open(Cursor::new(dar)).expect("open");
-    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
+    let paths: Vec<_> = r
+        .entries()
+        .into_iter()
+        .map(|e| e.path_lossy().into_owned())
+        .collect();
     assert_eq!(paths, ["a.txt", "b.txt"]);
 }
 
@@ -280,7 +279,14 @@ fn nested_directory_path_is_correct() {
     buf.push(EOD); // close sub
     buf.push(EOD); // close ROOT
     let r = DarReader::open(Cursor::new(buf)).expect("open");
-    assert_eq!(r.entries()[0].path, "sub/file.txt");
+    let entries = r.entries();
+    let paths: Vec<_> = entries
+        .iter()
+        .map(|e| e.path_lossy().into_owned())
+        .collect();
+    assert_eq!(paths, ["sub", "sub/file.txt"]);
+    assert_eq!(entries[0].kind, EntryKind::Directory);
+    assert_eq!(entries[1].kind, EntryKind::File);
 }
 
 // ── catalog: EOF without EOD ──────────────────────────────────────────────────
@@ -297,7 +303,11 @@ fn catalog_eof_without_eod_returns_entries() {
     buf.extend(file_entry("lone.txt", 0, b'n', 0, 0));
     // deliberately omit the EOD byte
     let r = DarReader::open(Cursor::new(buf)).expect("open");
-    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
+    let paths: Vec<_> = r
+        .entries()
+        .into_iter()
+        .map(|e| e.path_lossy().into_owned())
+        .collect();
     assert_eq!(paths, ["lone.txt"]);
 }
 
@@ -314,16 +324,20 @@ fn catalog_unknown_entry_type_stops_parsing() {
     buf.push(0x01); // cat_sig → 'a' (0x61), unknown type
     buf.push(EOD); // never reached
     let r = DarReader::open(Cursor::new(buf)).expect("open");
-    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
+    let paths: Vec<_> = r
+        .entries()
+        .into_iter()
+        .map(|e| e.path_lossy().into_owned())
+        .collect();
     assert_eq!(paths, ["before.txt"]);
 }
 
 // ── catalog: invalid UTF-8 filename ───────────────────────────────────────────
 
-/// A file entry whose name contains invalid UTF-8 must cause `open` to fail
-/// with `DarError::Corrupt`, not a panic or silent data loss.
+/// A file entry whose name is not valid UTF-8 must be preserved byte-for-byte,
+/// NOT rejected — forensic filenames are arbitrary bytes.
 #[test]
-fn catalog_invalid_utf8_filename_returns_corrupt() {
+fn catalog_non_utf8_filename_is_preserved() {
     let mut buf = header();
     buf.extend(catalog_open());
     buf.extend(root_dir());
@@ -334,14 +348,15 @@ fn catalog_invalid_utf8_filename_returns_corrupt() {
     buf.extend_from_slice(&inf(0)); // size
     buf.extend_from_slice(&inf(0)); // archive_offset
     buf.extend_from_slice(&inf(0)); // stored_size
-    buf.push(0x00); // enc
+    buf.push(0x00); // file_data_status
     buf.push(b'n'); // comp
     buf.extend_from_slice(&inf(0)); // crc_size
     buf.push(EOD);
-    assert!(matches!(
-        DarReader::open(Cursor::new(buf)),
-        Err(DarError::Corrupt(_))
-    ));
+    let r = DarReader::open(Cursor::new(buf)).expect("non-UTF-8 name must not fail open");
+    let entries = r.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path, vec![0xFF, 0x80]);
+    assert_eq!(entries[0].path_lossy(), "\u{FFFD}\u{FFFD}");
 }
 
 // ── catalog: label-only marker (no seqt_catalogue escape) ─────────────────────
@@ -369,7 +384,11 @@ fn catalog_without_escape_lists_entries() {
     buf.push(EOD);
 
     let r = DarReader::open(Cursor::new(buf)).expect("open with label-only catalog");
-    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
+    let paths: Vec<_> = r
+        .entries()
+        .into_iter()
+        .map(|e| e.path_lossy().into_owned())
+        .collect();
     assert_eq!(paths, ["a.txt"]);
 }
 
@@ -430,7 +449,7 @@ fn nanosecond_timestamp_inode_lists_entry() {
     let dar = minimal_dar(vec![file_entry_ns("hi.bin", 0, b'n', 0, 0)]);
     let r = DarReader::open(Cursor::new(dar)).expect("open");
     assert_eq!(r.entries().len(), 1);
-    assert_eq!(r.entries()[0].path, "hi.bin");
+    assert_eq!(r.entries()[0].path_lossy(), "hi.bin");
 }
 
 /// Same as above, but also verifies that extract() seeks to the correct offset.
@@ -490,7 +509,7 @@ fn catalog_without_nul_path_lists_entries() {
     buf.push(EOD);
     let r = DarReader::open(Cursor::new(buf)).expect("open");
     assert_eq!(r.entries().len(), 1);
-    assert_eq!(r.entries()[0].path, "f9.txt");
+    assert_eq!(r.entries()[0].path_lossy(), "f9.txt");
 }
 
 /// Format 10 (and 11.0) also have NO in-place path in the catalog header — per
@@ -508,7 +527,7 @@ fn catalog_format_10_has_no_inplace_path() {
     buf.push(EOD);
     let r = DarReader::open(Cursor::new(buf)).expect("open");
     assert_eq!(r.entries().len(), 1);
-    assert_eq!(r.entries()[0].path, "f10.txt");
+    assert_eq!(r.entries()[0].path_lossy(), "f10.txt");
 }
 
 // ── large infinint timestamps (0x40 encoding) ────────────────────────────────
@@ -561,7 +580,7 @@ fn file_with_large_timestamp_infinint_is_parseable() {
     let dar = minimal_dar(vec![file_entry_large_ts("big_ts.bin")]);
     let r = DarReader::open(Cursor::new(dar)).expect("open");
     assert_eq!(r.entries().len(), 1);
-    assert_eq!(r.entries()[0].path, "big_ts.bin");
+    assert_eq!(r.entries()[0].path_lossy(), "big_ts.bin");
 }
 
 /// A symlink between two regular files must not stop catalog parsing.
@@ -576,8 +595,17 @@ fn symlink_entry_does_not_stop_parsing() {
         file_entry("after.txt", 0, b'n', 0, 0),
     ]);
     let r = DarReader::open(Cursor::new(dar)).expect("open");
-    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
-    assert_eq!(paths, ["before.txt", "after.txt"]);
+    let entries = r.entries();
+    let paths: Vec<_> = entries
+        .iter()
+        .map(|e| e.path_lossy().into_owned())
+        .collect();
+    assert_eq!(paths, ["before.txt", "link.txt", "after.txt"]);
+    assert_eq!(entries[1].kind, EntryKind::Symlink);
+    assert_eq!(
+        entries[1].symlink_target.as_deref(),
+        Some(&b"/etc/target"[..])
+    );
 }
 
 // ── hardening: malicious / corrupted catalog fields ──────────────────────────
@@ -757,7 +785,7 @@ fn entry_with_fsa_block_is_listed() {
     entry.extend_from_slice(&inf(0)); // crc_size
     let dar = minimal_dar(vec![entry]);
     let r = DarReader::open(Cursor::new(dar)).expect("open");
-    assert_eq!(r.entries()[0].path, "fsa.txt");
+    assert_eq!(r.entries()[0].path_lossy(), "fsa.txt");
 }
 
 /// A symlink entry carrying an FSA block (FSA-full inode bit) must be skipped
@@ -773,8 +801,14 @@ fn symlink_with_fsa_block_is_skipped() {
     sym.extend_from_slice(b"/target\x00"); // symlink target
     let dar = minimal_dar(vec![sym, file_entry("after.txt", 0, b'n', 0, 0)]);
     let r = DarReader::open(Cursor::new(dar)).expect("open");
-    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
-    assert_eq!(paths, ["after.txt"]);
+    let entries = r.entries();
+    let paths: Vec<_> = entries
+        .iter()
+        .map(|e| e.path_lossy().into_owned())
+        .collect();
+    // The symlink (with its FSA block correctly skipped) and the file both list.
+    assert_eq!(paths, ["link", "after.txt"]);
+    assert_eq!(entries[0].symlink_target.as_deref(), Some(&b"/target"[..]));
 }
 
 // ── e2e coverage of helper guards through the public API ──────────────────────
@@ -1023,10 +1057,24 @@ fn v1_stored_lists_and_extracts() {
     let mut r = DarReader::open(Cursor::new(dar)).expect("open edition-1 stored");
     let entries = r.entries();
     assert_eq!(
-        entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+        entries
+            .iter()
+            .map(|e| e.path_lossy().into_owned())
+            .collect::<Vec<_>>(),
         ["root/hello.txt"]
     );
     assert_eq!(entries[0].size, content.len() as u64);
+    // Metadata is exposed (inode_v1: uid/gid 1000, mode 0o644, ts 1_600_000_000;
+    // format 1 records no ctime).
+    let f = &entries[0];
+    assert_eq!(f.kind, EntryKind::File);
+    assert_eq!(f.uid, 1000);
+    assert_eq!(f.gid, 1000);
+    assert_eq!(f.mode, 0o644);
+    assert_eq!(f.atime, 1_600_000_000);
+    assert_eq!(f.mtime, 1_600_000_000);
+    assert_eq!(f.ctime, None);
+    assert_eq!(f.symlink_target, None);
     assert_eq!(r.extract("root/hello.txt").expect("extract"), content);
 }
 
@@ -1036,7 +1084,10 @@ fn v1_gzip_catalogue_lists_and_extracts() {
     let mut r = DarReader::open(Cursor::new(dar)).expect("open edition-1 gzip");
     let entries = r.entries();
     assert_eq!(
-        entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+        entries
+            .iter()
+            .map(|e| e.path_lossy().into_owned())
+            .collect::<Vec<_>>(),
         ["root/hello.txt"]
     );
     assert_eq!(r.extract("root/hello.txt").expect("extract"), content);
@@ -1120,6 +1171,13 @@ fn pipe_and_socket_entries_do_not_stop_parsing() {
 
     let dar = minimal_dar(vec![pipe, sock, file_entry("after.txt", 0, b'n', 0, 0)]);
     let r = DarReader::open(Cursor::new(dar)).expect("open");
-    let paths: Vec<_> = r.entries().into_iter().map(|e| e.path).collect();
-    assert_eq!(paths, ["after.txt"]);
+    let entries = r.entries();
+    let paths: Vec<_> = entries
+        .iter()
+        .map(|e| e.path_lossy().into_owned())
+        .collect();
+    assert_eq!(paths, ["fifo", "sock", "after.txt"]);
+    assert_eq!(entries[0].kind, EntryKind::NamedPipe);
+    assert_eq!(entries[1].kind, EntryKind::Socket);
+    assert_eq!(entries[2].kind, EntryKind::File);
 }

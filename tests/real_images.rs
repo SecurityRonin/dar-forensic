@@ -23,11 +23,23 @@
 //! dar 2.5.3 source: <https://sourceforge.net/projects/dar/files/dar/2.5.3/>
 //! Contents: files/hello.txt — 15 bytes: "hello format 9\n"
 
-use dar_forensic::DarReader;
+use dar_forensic::{DarEntry, DarReader, EntryKind};
 use std::io::Cursor;
 use std::path::Path;
 
 const DATA_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
+
+/// The single regular-file entry in an archive (entries() now also lists the
+/// containing directory, so we can't assume index 0 is the file).
+fn sole_file(r: &DarReader<Cursor<Vec<u8>>>) -> DarEntry {
+    let files: Vec<DarEntry> = r
+        .entries()
+        .into_iter()
+        .filter(|e| e.kind == EntryKind::File)
+        .collect();
+    assert_eq!(files.len(), 1, "expected exactly one file entry");
+    files.into_iter().next().unwrap()
+}
 
 fn open_v11() -> DarReader<Cursor<Vec<u8>>> {
     let path = format!("{DATA_DIR}/v11_hello.dar");
@@ -47,22 +59,25 @@ fn v11_opens() {
 // ── entries ───────────────────────────────────────────────────────────────────
 
 #[test]
-fn v11_lists_one_entry() {
-    assert_eq!(open_v11().entries().len(), 1);
+fn v11_lists_one_file() {
+    assert_eq!(
+        open_v11()
+            .entries()
+            .iter()
+            .filter(|e| e.kind == EntryKind::File)
+            .count(),
+        1
+    );
 }
 
 #[test]
 fn v11_entry_path() {
-    let r = open_v11();
-    let entries = r.entries();
-    assert_eq!(entries[0].path, "files/hello.txt");
+    assert_eq!(sole_file(&open_v11()).path_lossy(), "files/hello.txt");
 }
 
 #[test]
 fn v11_entry_size_is_13() {
-    let r = open_v11();
-    let entries = r.entries();
-    assert_eq!(entries[0].size, 13);
+    assert_eq!(sole_file(&open_v11()).size, 13);
 }
 
 // ── extract ───────────────────────────────────────────────────────────────────
@@ -91,18 +106,25 @@ fn v9_opens() {
 }
 
 #[test]
-fn v9_lists_one_entry() {
-    assert_eq!(open_v9().entries().len(), 1);
+fn v9_lists_one_file() {
+    assert_eq!(
+        open_v9()
+            .entries()
+            .iter()
+            .filter(|e| e.kind == EntryKind::File)
+            .count(),
+        1
+    );
 }
 
 #[test]
 fn v9_entry_path() {
-    assert_eq!(open_v9().entries()[0].path, "root/files/hello.txt");
+    assert_eq!(sole_file(&open_v9()).path_lossy(), "root/files/hello.txt");
 }
 
 #[test]
 fn v9_entry_size_is_15() {
-    assert_eq!(open_v9().entries()[0].size, 15);
+    assert_eq!(sole_file(&open_v9()).size, 15);
 }
 
 #[test]
@@ -138,24 +160,34 @@ fn v8_opens() {
 }
 
 #[test]
-fn v8_lists_one_entry() {
-    assert_eq!(open_v8().entries().len(), 1);
+fn v8_lists_one_file() {
+    assert_eq!(
+        open_v8()
+            .entries()
+            .iter()
+            .filter(|e| e.kind == EntryKind::File)
+            .count(),
+        1
+    );
 }
 
 #[test]
 fn v8_entry_path_ends_with_hello_txt() {
-    assert!(open_v8().entries()[0].path.ends_with("files/hello.txt"));
+    assert!(sole_file(&open_v8())
+        .path_lossy()
+        .ends_with("files/hello.txt"));
 }
 
 #[test]
 fn v8_entry_size_is_15() {
-    assert_eq!(open_v8().entries()[0].size, 15);
+    assert_eq!(sole_file(&open_v8()).size, 15);
 }
 
 #[test]
 fn v8_extracts_hello_txt() {
-    let mut r = open_v8();
-    let path = r.entries()[0].path.clone(); // virtual-root prefix is data-determined
+    let r = open_v8();
+    let path = sole_file(&r).path; // virtual-root prefix is data-determined
+    let mut r = r;
     let data = r.extract(&path).expect("extract");
     assert_eq!(data, b"hello format 8\n");
 }
@@ -187,24 +219,34 @@ fn v10_opens() {
 }
 
 #[test]
-fn v10_lists_one_entry() {
-    assert_eq!(open_v10().entries().len(), 1);
+fn v10_lists_one_file() {
+    assert_eq!(
+        open_v10()
+            .entries()
+            .iter()
+            .filter(|e| e.kind == EntryKind::File)
+            .count(),
+        1
+    );
 }
 
 #[test]
 fn v10_entry_path_ends_with_hello_txt() {
-    assert!(open_v10().entries()[0].path.ends_with("files/hello.txt"));
+    assert!(sole_file(&open_v10())
+        .path_lossy()
+        .ends_with("files/hello.txt"));
 }
 
 #[test]
 fn v10_entry_size_is_16() {
-    assert_eq!(open_v10().entries()[0].size, 16);
+    assert_eq!(sole_file(&open_v10()).size, 16);
 }
 
 #[test]
 fn v10_extracts_hello_txt() {
-    let mut r = open_v10();
-    let path = r.entries()[0].path.clone();
+    let r = open_v10();
+    let path = sole_file(&r).path;
+    let mut r = r;
     let data = r.extract(&path).expect("extract");
     assert_eq!(data, b"hello format 10\n");
 }
@@ -240,24 +282,34 @@ fn v7_opens() {
 }
 
 #[test]
-fn v7_lists_one_entry() {
-    assert_eq!(open_v7().entries().len(), 1);
+fn v7_lists_one_file() {
+    assert_eq!(
+        open_v7()
+            .entries()
+            .iter()
+            .filter(|e| e.kind == EntryKind::File)
+            .count(),
+        1
+    );
 }
 
 #[test]
 fn v7_entry_path_ends_with_hello_txt() {
-    assert!(open_v7().entries()[0].path.ends_with("files/hello.txt"));
+    assert!(sole_file(&open_v7())
+        .path_lossy()
+        .ends_with("files/hello.txt"));
 }
 
 #[test]
 fn v7_entry_size_is_15() {
-    assert_eq!(open_v7().entries()[0].size, 15);
+    assert_eq!(sole_file(&open_v7()).size, 15);
 }
 
 #[test]
 fn v7_extracts_hello_txt() {
-    let mut r = open_v7();
-    let path = r.entries()[0].path.clone();
+    let r = open_v7();
+    let path = sole_file(&r).path;
+    let mut r = r;
     let data = r.extract(&path).expect("extract");
     assert_eq!(data, b"hello format 7\n");
 }
@@ -335,12 +387,12 @@ fn gzip_lists_both_entries() {
     assert_eq!(entries.len(), 2, "gzip archive must list both files");
     let payload = entries
         .iter()
-        .find(|e| e.path == "payload.txt")
+        .find(|e| e.path_lossy() == "payload.txt")
         .expect("payload.txt present");
     assert_eq!(payload.size, 136_000);
     let small = entries
         .iter()
-        .find(|e| e.path == "small.txt")
+        .find(|e| e.path_lossy() == "small.txt")
         .expect("small.txt present");
     assert_eq!(small.size, 5);
 }
@@ -370,7 +422,7 @@ fn assert_compressed_fixture(name: &str) {
     assert_eq!(
         entries
             .iter()
-            .find(|e| e.path == "payload.txt")
+            .find(|e| e.path_lossy() == "payload.txt")
             .expect("payload.txt present")
             .size,
         136_000
@@ -378,7 +430,7 @@ fn assert_compressed_fixture(name: &str) {
     assert_eq!(
         entries
             .iter()
-            .find(|e| e.path == "small.txt")
+            .find(|e| e.path_lossy() == "small.txt")
             .expect("small.txt present")
             .size,
         5
@@ -404,4 +456,21 @@ fn bzip2_lists_and_extracts() {
 #[test]
 fn xz_lists_and_extracts() {
     assert_compressed_fixture("v11_xz.dar");
+}
+
+// ── entry metadata (real fixtures) ────────────────────────────────────────────
+
+#[test]
+fn v11_file_exposes_timestamps_and_ctime() {
+    // Format 11 (>= 8) records ctime; the dar-created fixture has real mtimes.
+    let f = sole_file(&open_v11());
+    assert_eq!(f.kind, EntryKind::File);
+    assert!(f.ctime.is_some(), "format 11 records a ctime");
+    assert!(f.mtime > 0, "fixture has a real modification time");
+}
+
+#[test]
+fn v7_file_has_no_ctime() {
+    // Pre-8 formats do not record ctime, so it must be None.
+    assert_eq!(sole_file(&open_v7()).ctime, None);
 }
