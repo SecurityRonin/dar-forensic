@@ -8,6 +8,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`DarReader::entry_count()` and `iter_entries()`.** `entry_count()` returns
+  the number of catalogue entries in O(1) without cloning the list; `iter_entries()`
+  yields one `DarEntry` at a time so a streaming consumer over a large archive
+  (hundreds of thousands of entries) need not hold the whole `Vec<DarEntry>` in
+  memory. `entries()` is unchanged.
 - **Per-file CRC verification.** `DarReader::verify(path)` recomputes libdar's
   per-file CRC over the decompressed data and compares it to the value stored in
   the catalogue, returning `CrcStatus::Match`, `Mismatch { stored, computed }`
