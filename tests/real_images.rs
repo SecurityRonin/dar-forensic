@@ -498,3 +498,31 @@ fn extract_to_streams_decompressed() {
     assert_eq!(out, expected_payload());
     assert_eq!(n as usize, out.len());
 }
+
+#[test]
+fn write_bodyfile_emits_one_well_formed_line_per_entry() {
+    let mut r = open_v11();
+    let entry_count = r.entries().len();
+    let mut out = Vec::new();
+    r.write_bodyfile(&mut out).expect("write_bodyfile");
+    let text = String::from_utf8(out).expect("bodyfile is utf-8");
+
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), entry_count, "one line per catalogue entry");
+    // Every line carries the 11 pipe-delimited TSK fields (fixture names are clean).
+    for l in &lines {
+        assert_eq!(l.split('|').count(), 11, "line should have 11 fields: {l}");
+    }
+    // The known regular file appears, typed as a regular file (mode field `r/r…`).
+    let hello = lines
+        .iter()
+        .find(|l| l.contains("hello.txt"))
+        .expect("hello.txt entry in bodyfile");
+    assert!(
+        hello
+            .split('|')
+            .nth(3)
+            .is_some_and(|m| m.starts_with("r/r")),
+        "{hello}"
+    );
+}

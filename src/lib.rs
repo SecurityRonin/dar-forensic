@@ -139,6 +139,20 @@ impl DarEntry {
     pub fn path_lossy(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.path)
     }
+
+    /// One Sleuth Kit ["bodyfile"](https://wiki.sleuthkit.org/index.php?title=Body_file)
+    /// line for this entry (no trailing newline) — the input format for TSK's
+    /// `mactime` timeline tool.
+    ///
+    /// Fields: `MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime`. DAR
+    /// records no content hash, inode address, or birth time, so those are `0`;
+    /// `mode` uses TSK's `type/type+perms` form (e.g. `r/rrwxr-xr-x`); a
+    /// symlink's target is appended as ` -> target`; and `|`, `\`, and control
+    /// bytes in names are backslash-escaped so one entry stays one line.
+    #[must_use]
+    pub fn bodyfile(&self) -> String {
+        String::new()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -392,6 +406,14 @@ impl<R: Read + Seek> DarReader<R> {
         // Most-severe first; stable, so equal severities keep catalogue order.
         anomalies.sort_by_key(|a| std::cmp::Reverse(a.severity));
         anomalies
+    }
+
+    /// Write a Sleuth Kit [bodyfile](DarEntry::bodyfile) — one line per catalogue
+    /// entry, newline-terminated — to `out`, for feeding TSK's `mactime` timeline
+    /// tool. Pure metadata over the parsed catalogue; no archive data is read.
+    pub fn write_bodyfile<W: Write>(&self, out: &mut W) -> std::io::Result<()> {
+        let _ = out;
+        Ok(())
     }
 
     /// Extract a file by path, streaming its (decompressed) bytes to `out` and

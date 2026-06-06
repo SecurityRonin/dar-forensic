@@ -4,7 +4,7 @@
 //! specific code path that real archive fixtures cannot reach.  No on-disk
 //! files are required.
 
-use dar_forensic::{Anomaly, AnomalyKind, DarError, DarReader, EntryKind, Severity};
+use dar_forensic::{Anomaly, AnomalyKind, DarEntry, DarError, DarReader, EntryKind, Severity};
 use std::io::Cursor;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -1427,4 +1427,106 @@ fn audit_anomaly_serializes_to_json() {
         "{json}"
     );
     assert!(json.contains("UnsupportedCodec"), "{json}");
+}
+
+// ── bodyfile (Sleuth Kit mactime) export ──────────────────────────────────────
+
+fn mk_entry(path: &[u8], kind: EntryKind, mode: u16) -> DarEntry {
+    DarEntry {
+        path: path.to_vec(),
+        kind,
+        size: 0,
+        uid: 0,
+        gid: 0,
+        mode,
+        atime: 0,
+        mtime: 0,
+        ctime: None,
+        symlink_target: None,
+    }
+}
+
+#[test]
+fn bodyfile_basic_file_line() {
+    let e = mk_entry(b"notes.txt", EntryKind::File, 0);
+    assert_eq!(e.bodyfile(), "0|notes.txt|0|r/r---------|0|0|0|0|0|0|0");
+}
+
+#[test]
+fn bodyfile_includes_ids_size_and_times() {
+    let e = DarEntry {
+        path: b"f".to_vec(),
+        kind: EntryKind::File,
+        size: 4096,
+        uid: 1000,
+        gid: 1001,
+        mode: 0o644,
+        atime: 111,
+        mtime: 222,
+        ctime: Some(333),
+        symlink_target: None,
+    };
+    assert_eq!(
+        e.bodyfile(),
+        "0|f|0|r/rrw-r--r--|1000|1001|4096|111|222|333|0"
+    );
+}
+
+#[test]
+fn bodyfile_renders_permission_and_special_bits() {
+    let mode_str = |mode: u16| {
+        mk_entry(b"x", EntryKind::File, mode)
+            .bodyfile()
+            .split('|')
+            .nth(3)
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(mode_str(0o0755), "r/rrwxr-xr-x");
+    assert_eq!(mode_str(0o0644), "r/rrw-r--r--");
+    assert_eq!(mode_str(0o4755), "r/rrwsr-xr-x"); // setuid + owner exec → s
+    assert_eq!(mode_str(0o4644), "r/rrwSr--r--"); // setuid, no owner exec → S
+    assert_eq!(mode_str(0o2755), "r/rrwxr-sr-x"); // setgid + group exec → s
+    assert_eq!(mode_str(0o2745), "r/rrwxr-Sr-x"); // setgid, no group exec → S
+    assert_eq!(mode_str(0o1707), "r/rrwx---rwt"); // sticky + other exec → t
+    assert_eq!(mode_str(0o1706), "r/rrwx---rwT"); // sticky, no other exec → T
+}
+
+#[test]
+fn bodyfile_type_letter_per_kind() {
+    let tletter = |kind| {
+        mk_entry(b"x", kind, 0)
+            .bodyfile()
+            .split('|')
+            .nth(3)
+            .unwrap()
+            .chars()
+            .next()
+            .unwrap()
+    };
+    assert_eq!(tletter(EntryKind::File), 'r');
+    assert_eq!(tletter(EntryKind::Directory), 'd');
+    assert_eq!(tletter(EntryKind::Symlink), 'l');
+    assert_eq!(tletter(EntryKind::NamedPipe), 'p');
+    assert_eq!(tletter(EntryKind::Socket), 's');
+    assert_eq!(tletter(EntryKind::CharDevice), 'c');
+    assert_eq!(tletter(EntryKind::BlockDevice), 'b');
+    assert_eq!(tletter(EntryKind::Hardlink), 'r');
+    assert_eq!(tletter(EntryKind::Unknown('q')), '-');
+}
+
+#[test]
+fn bodyfile_escapes_pipe_backslash_and_control_bytes() {
+    // name bytes: a | b \ c <TAB> d <LF>
+    let line = mk_entry(b"a|b\\c\td\n", EntryKind::File, 0).bodyfile();
+    assert!(line.starts_with("0|a\\|b\\\\c\\x09d\\x0a|0|r/r"), "{line}");
+}
+
+#[test]
+fn bodyfile_appends_symlink_target() {
+    let mut e = mk_entry(b"link", EntryKind::Symlink, 0o777);
+    e.symlink_target = Some(b"/etc/passwd".to_vec());
+    let line = e.bodyfile();
+    assert!(line.contains("|link -> /etc/passwd|"), "{line}");
+    assert!(line.split('|').nth(3).unwrap().starts_with("l/l"), "{line}");
 }
