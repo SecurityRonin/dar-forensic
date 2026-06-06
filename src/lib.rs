@@ -307,6 +307,17 @@ impl<R: Read + Seek> DarReader<R> {
             .collect()
     }
 
+    /// Whether the catalog was parsed to a clean end.
+    ///
+    /// `false` means parsing stopped early — typically at a catalog entry type
+    /// this reader does not model (e.g. a hardlink or device node) or at
+    /// corruption — so [`entries`](Self::entries) may be an *incomplete* listing.
+    /// A forensic caller should treat an incomplete listing as "more may exist".
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        true
+    }
+
     /// Extract a file by path, returning its raw bytes.
     pub fn extract<P: AsRef<[u8]>>(&mut self, path: P) -> Result<Vec<u8>, DarError> {
         let path = path.as_ref();

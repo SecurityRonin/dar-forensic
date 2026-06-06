@@ -1181,3 +1181,32 @@ fn pipe_and_socket_entries_do_not_stop_parsing() {
     assert_eq!(entries[1].kind, EntryKind::Socket);
     assert_eq!(entries[2].kind, EntryKind::File);
 }
+
+// ── loud-not-silent on unknown entry types ───────────────────────────────────
+
+#[test]
+fn unknown_entry_type_marks_listing_incomplete() {
+    // A hardlink ('m', cat_sig 0x0d) is a type this reader does not model.
+    // Hitting it must flag the listing as incomplete, not silently look done —
+    // a forensic listing that silently drops everything after it is dangerous.
+    let dar = minimal_dar(vec![file_entry("a.txt", 0, b'n', 0, 0), vec![0x0d]]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert!(
+        !r.is_complete(),
+        "an unmodelled entry type must mark the listing incomplete"
+    );
+    // entries parsed before the unknown type are still returned.
+    let paths: Vec<_> = r
+        .entries()
+        .iter()
+        .map(|e| e.path_lossy().into_owned())
+        .collect();
+    assert_eq!(paths, ["a.txt"]);
+}
+
+#[test]
+fn well_formed_archive_is_complete() {
+    let dar = minimal_dar(vec![file_entry("a.txt", 0, b'n', 0, 0)]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert!(r.is_complete());
+}
