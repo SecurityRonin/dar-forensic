@@ -6,13 +6,13 @@
 [![CI](https://github.com/SecurityRonin/dar-forensic/actions/workflows/ci.yml/badge.svg)](https://github.com/SecurityRonin/dar-forensic/actions)
 [![Sponsor](https://img.shields.io/badge/sponsor-h4x0r-ea4aaa?logo=github-sponsors)](https://github.com/sponsors/h4x0r)
 
-Pure-Rust reader for Denis Corbin **DAR (Disk ARchiver)** archives — the format mobile-forensics tools (Passware Kit Mobile, Cellebrite) use for full-filesystem extractions. Enumerates the catalog, seeks straight to any file for random-access extraction, and is hardened to be pointed safely at untrusted evidence. Zero `unsafe`, no GPL, no C bindings.
+Pure-Rust reader for Denis Corbin **DAR (Disk ARchiver)** archives — the format mobile-forensics tools (Passware Kit Mobile, Cellebrite) use for full-filesystem extractions. Enumerates the catalog, seeks straight to any file for random-access extraction — transparently decompressing gzip, bzip2 and xz — and is hardened to be pointed safely at untrusted evidence. Zero `unsafe`, no GPL, no C bindings.
 
 ## Rust library
 
 ```toml
 [dependencies]
-dar-forensic = "0.1"
+dar-forensic = "0.2"
 ```
 
 ## Quick start
@@ -44,6 +44,7 @@ DAR is a C++ format; the reference implementation (`libdar`) is GPL with C bindi
 | Reads DAR formats 7–11 | ✅ | ✅ (all validated against real fixtures) |
 | Tape-marks-disabled archives (Passware / mobile) | ✅ | ✅ |
 | Random-access extraction (`Read + Seek`) | ✅ | ✅ — composes with `ewf`, `vmdk`, … |
+| Transparent gzip / bzip2 / xz decompression | ✅ | ✅ — pure-Rust decoders, no C |
 | Tail-scan for 90+ GiB archives (≈107 MiB read, not 99 GiB) | — | ✅ |
 | Hardened against malicious input (no panic / OOM / backward seek) | — | ✅ |
 | Continuous fuzzing | — | ✅ `cargo fuzz` |
@@ -72,7 +73,7 @@ The format version is the header `version_string`, each byte `value + 48` (`"090
 ### Scope and limits
 
 - **Read-only** — does not create or modify archives.
-- **Uncompressed, unencrypted entries** — compressed/encrypted entries are *listed*, but `extract()` returns a clear error rather than wrong bytes; decompression and decryption are out of scope.
+- **Decompression: gzip, bzip2, xz** — these are transparently inflated for both the compressed catalog and extracted entry data (pure-Rust decoders, bounded against decompression bombs). Archives using lzo, zstd or lz4 are recognised but not yet decoded; encrypted entries are *listed* but `extract()` returns a clear error rather than wrong bytes — decryption is out of scope.
 - **CRC fields are parsed but not yet verified** — the stored per-file CRC is located and skipped; integrity verification against it is not implemented.
 
 ## Security
@@ -95,7 +96,7 @@ cargo +nightly fuzz run fuzz_open
 
 ## Testing
 
-92 tests — unit (private helpers + every error branch), synthetic-archive integration, and real-fixture integration — at **100% library line coverage, enforced in CI** (`cargo llvm-cov`, lcov gate). One public fixture per format (`v7`–`v11`, built with the matching dar release, committed and reproducible) runs in CI; parsing was additionally confirmed against a confidential 92 GiB Passware Kit Mobile archive (DAR format 9, 637,698 entries — not committed). The parser survives millions of `cargo fuzz` executions with zero crashes.
+103 tests — unit (private helpers + every error branch), synthetic-archive integration, and real-fixture integration (including real gzip/bzip2/xz `dar -z` archives) — at **100% library line coverage, enforced in CI** (`cargo llvm-cov`, lcov gate). One public fixture per format (`v7`–`v11`, built with the matching dar release, committed and reproducible) runs in CI; parsing was additionally confirmed against a confidential 92 GiB Passware Kit Mobile archive (DAR format 9, 637,698 entries — not committed). The parser survives millions of `cargo fuzz` executions with zero crashes.
 
 ```bash
 cargo test

@@ -1,7 +1,9 @@
 //! Pure-Rust reader for Denis Corbin DAR (Disk ARchiver) archives.
 //!
-//! Supports DAR format versions 8 through 11 (produced by dar 2.4–2.8).
+//! Supports DAR formats 7–11 (produced by dar 2.3–2.8) and the legacy ≤7 grammar.
 //! Passware Kit Mobile produces format-9 archives; dar 2.8.5 produces 11.3.
+//! Entries and the catalogue compressed with gzip, bzip2 or xz are transparently
+//! decompressed (pure-Rust); lzo, zstd, lz4 and encryption are not decoded.
 //!
 //! ## Format sketch
 //!
