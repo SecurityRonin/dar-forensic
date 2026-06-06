@@ -1725,3 +1725,36 @@ fn crc_status_display() {
         "CRC mismatch: stored ab, computed cd"
     );
 }
+
+// ── O(1) count + lazy entry iteration ─────────────────────────────────────────
+
+#[test]
+fn entry_count_matches_entries_len() {
+    let dar = minimal_dar(vec![
+        file_entry("a.txt", 0, b'n', 0, 0),
+        file_entry("b.txt", 0, b'n', 0, 0),
+    ]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert_eq!(r.entry_count(), r.entries().len());
+    assert_eq!(r.entry_count(), 2);
+}
+
+#[test]
+fn iter_entries_matches_collected_entries() {
+    let dar = minimal_dar(vec![
+        file_entry("a.txt", 0, b'n', 0, 0),
+        file_entry("b.txt", 0, b'n', 0, 0),
+    ]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    let lazy: Vec<_> = r
+        .iter_entries()
+        .map(|e| e.path_lossy().into_owned())
+        .collect();
+    let eager: Vec<_> = r
+        .entries()
+        .iter()
+        .map(|e| e.path_lossy().into_owned())
+        .collect();
+    assert_eq!(lazy, eager);
+    assert_eq!(lazy, ["a.txt", "b.txt"]);
+}

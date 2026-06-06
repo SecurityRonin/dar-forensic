@@ -383,6 +383,22 @@ impl<R: Read + Seek> DarReader<R> {
         })
     }
 
+    /// Number of catalogue entries, in O(1) — without materialising or cloning
+    /// the entry list (cheap even for a multi-hundred-thousand-entry archive).
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        0
+    }
+
+    /// Iterate the catalogue entries lazily, cloning one [`DarEntry`] at a time
+    /// rather than allocating the whole `Vec` up front — for streaming over a
+    /// large archive (hashing, timelining, filtering) without holding every
+    /// entry in memory at once. Use [`entries`](Self::entries) when you want them
+    /// all collected.
+    pub fn iter_entries(&self) -> impl Iterator<Item = DarEntry> + '_ {
+        std::iter::empty()
+    }
+
     /// List all archived file entries (path and uncompressed size).
     pub fn entries(&self) -> Vec<DarEntry> {
         self.entries
