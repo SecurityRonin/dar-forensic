@@ -160,6 +160,8 @@ pub struct DarReader<R: Read + Seek> {
     /// per-entry `storage_size`, so a compressed format-1 entry is decoded by
     /// streaming the codec to its natural end rather than reading a fixed length.
     format_major: u32,
+    /// Whether the catalog parsed to a clean root EOD (see [`DarReader::is_complete`]).
+    complete: bool,
     entries: Vec<EntryRef>,
 }
 
@@ -185,6 +187,7 @@ impl<R: Read + Seek> DarReader<R> {
         let entries;
         let archive_origin;
         let format_major;
+        let complete;
         if extension == b'T' {
             // TLV list: infinint(count) then count × (u16 type + infinint len + data)
             let tlv_count = read_infinint(&mut reader).map_err(|e| match e {
@@ -226,7 +229,7 @@ impl<R: Read + Seek> DarReader<R> {
                 if format_value >= FORMAT_11_1 {
                     skip_nul_string(&mut cur)?;
                 }
-                entries = parse_catalog(&mut cur, format_major, global_comp)?;
+                (entries, complete) = parse_catalog(&mut cur, format_major, global_comp)?;
             } else {
                 if via_escape {
                     skip(&mut reader, 10)?; // catalog label
@@ -236,7 +239,7 @@ impl<R: Read + Seek> DarReader<R> {
                         skip_nul_string(&mut reader)?;
                     }
                 }
-                entries = parse_catalog(&mut reader, format_major, global_comp)?;
+                (entries, complete) = parse_catalog(&mut reader, format_major, global_comp)?;
             }
         } else if extension == b'N' || extension == b'S' {
             if extension == b'S' {
@@ -270,9 +273,10 @@ impl<R: Read + Seek> DarReader<R> {
                     .take(MAX_CATALOGUE_COMPRESSED)
                     .read_to_end(&mut compressed)?;
                 let inflated = decompress(&compressed, global_comp, MAX_CATALOGUE_INFLATED)?;
-                entries = parse_catalog(&mut Cursor::new(inflated), format_major, global_comp)?;
+                (entries, complete) =
+                    parse_catalog(&mut Cursor::new(inflated), format_major, global_comp)?;
             } else {
-                entries = parse_catalog(&mut reader, format_major, global_comp)?;
+                (entries, complete) = parse_catalog(&mut reader, format_major, global_comp)?;
             }
         } else {
             return Err(DarError::Corrupt(format!(
@@ -284,6 +288,7 @@ impl<R: Read + Seek> DarReader<R> {
             inner: reader,
             archive_origin,
             format_major,
+            complete,
             entries,
         })
     }
@@ -315,7 +320,7 @@ impl<R: Read + Seek> DarReader<R> {
     /// A forensic caller should treat an incomplete listing as "more may exist".
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        true
+        self.complete
     }
 
     /// Extract a file by path, returning its raw bytes.
@@ -688,10 +693,13 @@ fn parse_catalog<R: Read + Seek>(
     r: &mut R,
     format_major: u32,
     global_comp: u8,
-) -> Result<Vec<EntryRef>, DarError> {
+) -> Result<(Vec<EntryRef>, bool), DarError> {
     let mut entries = Vec::new();
     let mut dir_stack: Vec<Vec<u8>> = Vec::new();
     let mut depth: u32 = 0;
+    // True once the catalog is walked to its closing root EOD; left false if we
+    // stop early (unknown entry type or a truncated stream).
+    let mut complete = false;
 
     loop {
         let mut buf = [0u8; 1];
@@ -709,6 +717,7 @@ fn parse_catalog<R: Read + Seek>(
                 depth = depth.saturating_sub(1);
                 dir_stack.pop();
                 if depth == 0 {
+                    complete = true; // reached the closing root EOD — clean end
                     break;
                 }
             }
@@ -788,7 +797,7 @@ fn parse_catalog<R: Read + Seek>(
         }
     }
 
-    Ok(entries)
+    Ok((entries, complete))
 }
 
 /// Read the file-specific catalog fields after the inode and return
