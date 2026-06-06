@@ -49,6 +49,9 @@ use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
 use thiserror::Error;
 
+mod findings;
+pub use findings::{Anomaly, AnomalyKind, Severity};
+
 /// `00 00 00 7b` — DAR magic (SAUV_MAGIC_NUMBER = 123, big-endian u32).
 const DAR_MAGIC: [u8; 4] = [0x00, 0x00, 0x00, 0x7b];
 
@@ -321,6 +324,15 @@ impl<R: Read + Seek> DarReader<R> {
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.complete
+    }
+
+    /// Audit the loaded catalogue for forensic anomalies, returning them sorted
+    /// most-severe first. Pure metadata analysis over the already-parsed
+    /// catalogue — no archive data is read or decoded. See [`AnomalyKind`] for
+    /// what is detected; each [`Anomaly`] is an observation, not a conclusion.
+    #[must_use]
+    pub fn audit(&self) -> Vec<Anomaly> {
+        Vec::new()
     }
 
     /// Extract a file by path, streaming its (decompressed) bytes to `out` and

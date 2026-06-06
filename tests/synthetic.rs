@@ -4,7 +4,7 @@
 //! specific code path that real archive fixtures cannot reach.  No on-disk
 //! files are required.
 
-use dar_forensic::{DarError, DarReader, EntryKind};
+use dar_forensic::{Anomaly, AnomalyKind, DarError, DarReader, EntryKind, Severity};
 use std::io::Cursor;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -1263,4 +1263,168 @@ fn well_formed_archive_is_complete() {
     let dar = minimal_dar(vec![file_entry("a.txt", 0, b'n', 0, 0)]);
     let r = DarReader::open(Cursor::new(dar)).expect("open");
     assert!(r.is_complete());
+}
+
+// ── audit() forensic anomaly detection ────────────────────────────────────────
+
+/// A file entry whose mtime is implausibly far in the future (~year 2103),
+/// encoded with the 32-bit infinint form (the value stays below `u32::MAX`).
+fn file_entry_future_mtime(name: &str) -> Vec<u8> {
+    let mut v = vec![0x06u8]; // cat_sig → 'f'
+    v.extend_from_slice(name.as_bytes());
+    v.push(0x00);
+    v.push(0x00); // inode flags
+    v.extend_from_slice(&inf(0)); // uid
+    v.extend_from_slice(&inf(0)); // gid
+    v.extend_from_slice(&[0x00, 0x00]); // perms
+    v.push(b's');
+    v.extend_from_slice(&inf(0)); // atime
+    v.push(b's');
+    v.extend_from_slice(&inf(4_200_000_000)); // mtime ~2103 (> year-2100 ceiling)
+    v.push(b's');
+    v.extend_from_slice(&inf(0)); // ctime
+    v.extend_from_slice(&inf(0)); // data_size
+    v.extend_from_slice(&inf(0)); // archive_offset
+    v.extend_from_slice(&inf(0)); // stored_size
+    v.push(0x00); // enc = none
+    v.push(b'n'); // comp = none
+    v.extend_from_slice(&inf(0)); // crc_size = 0
+    v
+}
+
+fn codes(anomalies: &[Anomaly]) -> Vec<&'static str> {
+    anomalies.iter().map(|a| a.code).collect()
+}
+
+#[test]
+fn audit_clean_archive_reports_no_anomalies() {
+    let dar = minimal_dar(vec![file_entry("notes.txt", 0, b'n', 0, 0)]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert!(r.audit().is_empty());
+}
+
+#[test]
+fn audit_flags_incomplete_catalog() {
+    // A hardlink ('m', 0x0d) is an unmodelled type → parsing stops → incomplete.
+    let dar = minimal_dar(vec![file_entry("a.txt", 0, b'n', 0, 0), vec![0x0d]]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    let anomalies = r.audit();
+    let a = anomalies
+        .iter()
+        .find(|a| a.code == "DAR-CATALOG-INCOMPLETE")
+        .expect("incomplete-catalog anomaly");
+    assert_eq!(a.severity, Severity::High);
+    assert!(matches!(
+        a.kind,
+        AnomalyKind::IncompleteCatalog {
+            entries_recovered: 1
+        }
+    ));
+}
+
+#[test]
+fn audit_flags_unsupported_codec() {
+    let dar = minimal_dar(vec![file_entry("blob.lzo", 0, b'l', 0, 0)]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    let anomalies = r.audit();
+    let a = anomalies
+        .iter()
+        .find(|a| a.code == "DAR-CODEC-UNSUPPORTED")
+        .expect("unsupported-codec anomaly");
+    assert_eq!(a.severity, Severity::Medium);
+    assert!(matches!(
+        &a.kind,
+        AnomalyKind::UnsupportedCodec { codec: 'l', .. }
+    ));
+}
+
+#[test]
+fn audit_flags_absolute_path() {
+    let dar = minimal_dar(vec![file_entry("/etc/shadow", 0, b'n', 0, 0)]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert!(codes(&r.audit()).contains(&"DAR-PATH-ABSOLUTE"));
+}
+
+#[test]
+fn audit_flags_parent_traversal() {
+    let dar = minimal_dar(vec![file_entry("../../escape", 0, b'n', 0, 0)]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert!(codes(&r.audit()).contains(&"DAR-PATH-TRAVERSAL"));
+}
+
+#[test]
+fn audit_flags_duplicate_path_once() {
+    let dar = minimal_dar(vec![
+        file_entry("dup.bin", 0, b'n', 0, 0),
+        file_entry("dup.bin", 0, b'n', 0, 0),
+    ]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    let dups: Vec<_> = r
+        .audit()
+        .into_iter()
+        .filter(|a| a.code == "DAR-PATH-DUPLICATE")
+        .collect();
+    assert_eq!(dups.len(), 1, "a duplicated path is reported exactly once");
+}
+
+#[test]
+fn audit_flags_future_timestamp() {
+    let dar = minimal_dar(vec![file_entry_future_mtime("backdated.bin")]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    let a = r
+        .audit()
+        .into_iter()
+        .find(|a| a.code == "DAR-TIME-FUTURE")
+        .expect("future-timestamp anomaly");
+    assert_eq!(a.severity, Severity::Low);
+    assert!(matches!(
+        a.kind,
+        AnomalyKind::FutureTimestamp { field: "mtime", .. }
+    ));
+}
+
+#[test]
+fn audit_flags_control_chars_in_name() {
+    let dar = minimal_dar(vec![file_entry("inv\x1bisible", 0, b'n', 0, 0)]);
+    let r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert!(codes(&r.audit()).contains(&"DAR-NAME-CONTROL"));
+}
+
+#[test]
+fn severity_orders_and_displays() {
+    assert!(Severity::Info < Severity::Low);
+    assert!(Severity::Low < Severity::Medium);
+    assert!(Severity::Medium < Severity::High);
+    assert!(Severity::High < Severity::Critical);
+    assert_eq!(Severity::Info.to_string(), "INFO");
+    assert_eq!(Severity::Low.to_string(), "LOW");
+    assert_eq!(Severity::Medium.to_string(), "MEDIUM");
+    assert_eq!(Severity::High.to_string(), "HIGH");
+    assert_eq!(Severity::Critical.to_string(), "CRITICAL");
+}
+
+#[test]
+fn anomaly_display_is_bracketed_severity_code_note() {
+    let a = Anomaly::new(AnomalyKind::AbsolutePath {
+        path: "/etc/shadow".into(),
+    });
+    let s = a.to_string();
+    assert!(s.starts_with("[MEDIUM] DAR-PATH-ABSOLUTE: "));
+    assert!(s.contains("/etc/shadow"));
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn audit_anomaly_serializes_to_json() {
+    let a = Anomaly::new(AnomalyKind::UnsupportedCodec {
+        path: "blob.lzo".into(),
+        codec: 'l',
+    });
+    let json = serde_json::to_string(&a).expect("serialize");
+    assert!(json.contains("\"severity\":\"Medium\""), "{json}");
+    assert!(
+        json.contains("\"code\":\"DAR-CODEC-UNSUPPORTED\""),
+        "{json}"
+    );
+    assert!(json.contains("UnsupportedCodec"), "{json}");
 }

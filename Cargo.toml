@@ -13,15 +13,23 @@ authors     = ["Albert Hui"]
 keywords    = ["forensics", "dar", "archive", "passware", "backup"]
 categories  = ["parser-implementations"]
 
+[features]
+# Derive `serde::Serialize` on the public `audit()` finding types (Severity,
+# AnomalyKind, Anomaly) for JSON/structured export. Off by default — the core
+# reader has zero serialization deps.
+serde = ["dep:serde"]
+
 [dependencies]
 thiserror = { workspace = true }
 flate2    = { workspace = true }
 bzip2-rs  = { workspace = true }
 lzma-rs   = { workspace = true }
+serde     = { workspace = true, optional = true }
 
 [dev-dependencies]
-tempfile  = { workspace = true }
-flate2    = { workspace = true }
+tempfile   = { workspace = true }
+flate2     = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
@@ -38,6 +46,9 @@ flate2    = { version = "1", default-features = false, features = ["rust_backend
 bzip2-rs  = "0.1"
 # Pure-Rust xz/lzma decoder; keeps unsafe_code = "deny".
 lzma-rs   = "0.3"
+# Optional structured-output support for audit() findings (feature = "serde").
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
