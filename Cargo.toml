@@ -17,6 +17,7 @@ categories  = ["parser-implementations"]
 thiserror = { workspace = true }
 flate2    = { workspace = true }
 bzip2-rs  = { workspace = true }
+lzma-rs   = { workspace = true }
 
 [dev-dependencies]
 tempfile  = { workspace = true }
@@ -35,6 +36,8 @@ tempfile  = "3"
 flate2    = { version = "1", default-features = false, features = ["rust_backend"] }
 # Pure-Rust bzip2 decoder (decompress-only); keeps unsafe_code = "deny".
 bzip2-rs  = "0.1"
+# Pure-Rust xz/lzma decoder; keeps unsafe_code = "deny".
+lzma-rs   = "0.3"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -43,7 +43,7 @@
 //!
 //! Full format notes: `docs/implementation-notes.md`.
 
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
 use thiserror::Error;
 
@@ -443,10 +443,55 @@ fn decompress(data: &[u8], algo: u8, max_out: u64) -> Result<Vec<u8>, DarError> 
         // dar's "gzip" is a raw zlib stream (78 xx), not a gzip (1f 8b) wrapper.
         b'z' => read_bounded(flate2::read::ZlibDecoder::new(data), max_out, "zlib"),
         b'y' => read_bounded(bzip2_rs::DecoderReader::new(data), max_out, "bzip2"),
+        b'x' => {
+            // lzma-rs is writer-driven and has no output cap, so a BoundedWriter
+            // enforces the same decompression-bomb guard the Read codecs get.
+            let mut input: &[u8] = data;
+            let mut out = BoundedWriter {
+                buf: Vec::new(),
+                max: max_out,
+            };
+            match lzma_rs::xz_decompress(&mut input, &mut out) {
+                Ok(()) => Ok(out.buf),
+                // The DAR trailer follows the catalogue's xz stream. lzma-rs
+                // fully decodes and validates the stream (blocks, index, CRC,
+                // footer magic) before rejecting trailing bytes, so on this one
+                // error the output is already complete and sound. Per-file
+                // extract passes exactly stored_size bytes and never trails.
+                // (String coupling is why lzma-rs is pinned to 0.3.x.)
+                Err(lzma_rs::error::Error::XzError(ref m))
+                    if m == "Unexpected data after last XZ block" =>
+                {
+                    Ok(out.buf)
+                }
+                Err(e) => Err(DarError::Corrupt(format!("xz decode failed: {e}"))),
+            }
+        }
         other => Err(DarError::Corrupt(format!(
             "unsupported compression '{}'",
             other as char
         ))),
+    }
+}
+
+/// A `Write` sink that buffers up to `max` bytes and then fails, capping the
+/// output of a writer-driven decoder (lzma-rs) against a decompression bomb.
+struct BoundedWriter {
+    buf: Vec<u8>,
+    max: u64,
+}
+
+impl Write for BoundedWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.buf.len() as u64 + data.len() as u64 > self.max {
+            return Err(std::io::Error::other("decompressed data exceeds bound"));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -1147,5 +1192,24 @@ mod tests {
     fn decompress_rejects_malformed_zlib() {
         let err = decompress(b"not a zlib stream at all", b'z', 1024).unwrap_err();
         assert!(matches!(&err, DarError::Corrupt(s) if s.contains("zlib decode failed")));
+    }
+
+    #[test]
+    fn decompress_rejects_malformed_xz() {
+        let err = decompress(b"this is not an xz stream", b'x', 1024).unwrap_err();
+        assert!(matches!(&err, DarError::Corrupt(s) if s.contains("xz decode failed")));
+    }
+
+    #[test]
+    fn bounded_writer_caps_output_and_flushes() {
+        let mut w = BoundedWriter {
+            buf: Vec::new(),
+            max: 4,
+        };
+        assert_eq!(w.write(b"ab").unwrap(), 2); // within bound
+        w.flush().unwrap();
+        let err = w.write(b"cde").unwrap_err(); // 2 + 3 > 4
+        assert_eq!(err.to_string(), "decompressed data exceeds bound");
+        assert_eq!(w.buf, b"ab");
     }
 }
