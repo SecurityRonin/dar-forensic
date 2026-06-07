@@ -364,15 +364,33 @@ fn extract_missing_path_returns_err() {
 // payload.txt (136000 bytes, 99% compressible) is stored compressed; small.txt
 // (5 bytes) is too small to benefit and is stored uncompressed.
 
-#[cfg(any(feature = "gzip", feature = "bzip2", feature = "xz", feature = "zstd"))]
+#[cfg(any(
+    feature = "gzip",
+    feature = "bzip2",
+    feature = "xz",
+    feature = "zstd",
+    feature = "lz4"
+))]
 const PAYLOAD_LINE: &str = "dar-forensic gzip bzip2 xz roundtrip corpus line padding 0123456789\n";
 
-#[cfg(any(feature = "gzip", feature = "bzip2", feature = "xz", feature = "zstd"))]
+#[cfg(any(
+    feature = "gzip",
+    feature = "bzip2",
+    feature = "xz",
+    feature = "zstd",
+    feature = "lz4"
+))]
 fn expected_payload() -> Vec<u8> {
     PAYLOAD_LINE.repeat(2000).into_bytes()
 }
 
-#[cfg(any(feature = "gzip", feature = "bzip2", feature = "xz", feature = "zstd"))]
+#[cfg(any(
+    feature = "gzip",
+    feature = "bzip2",
+    feature = "xz",
+    feature = "zstd",
+    feature = "lz4"
+))]
 fn open_fixture(name: &str) -> DarReader<Cursor<Vec<u8>>> {
     let path = format!("{DATA_DIR}/{name}");
     let data = std::fs::read(Path::new(&path)).unwrap_or_else(|e| panic!("read {name}: {e}"));
@@ -421,7 +439,13 @@ fn gzip_extracts_stored_small_file() {
 
 /// Full round-trip for a compressed fixture: list both entries, then extract the
 /// compressed payload and the stored small file.
-#[cfg(any(feature = "bzip2", feature = "xz", feature = "zstd"))]
+#[cfg(any(
+    feature = "gzip",
+    feature = "bzip2",
+    feature = "xz",
+    feature = "zstd",
+    feature = "lz4"
+))]
 fn assert_compressed_fixture(name: &str) {
     let r = open_fixture(name);
     let entries = r.entries();
@@ -473,6 +497,38 @@ fn xz_lists_and_extracts() {
 #[test]
 fn zstd_lists_and_extracts() {
     assert_compressed_fixture("v11_zstd.dar");
+}
+
+// ── per-block compression (dar block_compressor; `-z algo:lvl:blocksize`) ──────
+// These archives compress catalogue + entries as a sequence of independently
+// compressed blocks rather than one stream. lz4 (and lzo) ALWAYS use this mode.
+
+// Default `dar -zlz4` (240 kio blocks): payload fits one block. Real dar 2.8.
+#[cfg(feature = "lz4")]
+#[test]
+fn lz4_default_block_lists_and_extracts() {
+    assert_compressed_fixture("v11_lz4.dar");
+}
+
+// `dar -zlz4:9:1024` — 1 KiB blocks, so the 136 KB payload spans ~133 lz4 blocks.
+#[cfg(feature = "lz4")]
+#[test]
+fn lz4_multiblock_lists_and_extracts() {
+    assert_compressed_fixture("pb_lz4.dar");
+}
+
+// `dar -zgzip:6:1024` — per-block gzip (each block a complete zlib stream).
+#[cfg(feature = "gzip")]
+#[test]
+fn gzip_block_mode_lists_and_extracts() {
+    assert_compressed_fixture("pb_gzip.dar");
+}
+
+// `dar -zzstd:6:1024` — per-block zstd (each block a standard zstd frame).
+#[cfg(feature = "zstd")]
+#[test]
+fn zstd_block_mode_lists_and_extracts() {
+    assert_compressed_fixture("pb_zstd.dar");
 }
 
 // ── entry metadata (real fixtures) ────────────────────────────────────────────
