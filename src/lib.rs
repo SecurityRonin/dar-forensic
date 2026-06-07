@@ -2,8 +2,9 @@
 //!
 //! Supports DAR formats 7–11 (produced by dar 2.3–2.8) and the legacy ≤7 grammar.
 //! Passware Kit Mobile produces format-9 archives; dar 2.8.5 produces 11.3.
-//! Entries and the catalogue compressed with gzip, bzip2 or xz are transparently
-//! decompressed (pure-Rust); lzo, zstd, lz4 and encryption are not decoded.
+//! Entries and the catalogue compressed with gzip, bzip2, xz, zstd, lz4 or lzo
+//! are transparently decompressed (pure-Rust; each an optional feature, all on by
+//! default); encryption is not decoded.
 //!
 //! ## Format sketch
 //!
@@ -855,15 +856,19 @@ fn is_compressed(algo: u8) -> bool {
 }
 
 /// The codec character if `algo` names a compression this build cannot decode:
-/// always lzo (`l`/`j`/`k`) and lz4 (`q`), plus gzip/bzip2/xz/zstd when their
-/// feature is disabled. Returns `None` for a decodable codec or a stored entry.
-/// The original case is preserved (uppercase = per-block) as evidence.
+/// any recognised codec whose feature is disabled. With every codec feature on
+/// (the default) this returns `None` for all recognised codecs; a lean build
+/// (`default-features = false`) reports each compressed entry it cannot decode.
+/// Returns `None` for a decodable codec or a stored entry. The original case is
+/// preserved (uppercase = per-block) as evidence.
 fn unsupported_codec(algo: u8) -> Option<char> {
     let lower = algo.to_ascii_lowercase();
     let decodable = (cfg!(feature = "gzip") && lower == b'z')
         || (cfg!(feature = "bzip2") && lower == b'y')
         || (cfg!(feature = "xz") && lower == b'x')
-        || (cfg!(feature = "zstd") && lower == b'd');
+        || (cfg!(feature = "zstd") && lower == b'd')
+        || (cfg!(feature = "lz4") && lower == b'q')
+        || (cfg!(feature = "lzo") && matches!(lower, b'l' | b'j' | b'k'));
     let compressed = matches!(lower, b'z' | b'y' | b'x' | b'l' | b'j' | b'k' | b'd' | b'q');
     (compressed && !decodable).then_some(algo as char)
 }
@@ -914,7 +919,7 @@ fn decode_data<W: Write>(
 /// block size (the lz4 destination capacity); it is unused without the `lz4`
 /// feature. Each block's compressed size is bounded by the remaining input,
 /// which also bounds the loop to O(input) iterations.
-#[cfg_attr(not(feature = "lz4"), allow(unused_variables))]
+#[cfg_attr(not(any(feature = "lz4", feature = "lzo")), allow(unused_variables))]
 fn decode_blocks<W: Write>(
     data: &[u8],
     algo: u8,
@@ -925,21 +930,23 @@ fn decode_blocks<W: Write>(
     const H_EOF: u8 = 2;
 
     let mut input = data;
-    // Reusable lz4 destination buffer (raw lz4 blocks carry no uncompressed
-    // size). Seeded to the declared block size, or to cover dar's default
-    // (240 KiB) when the archive records none — so a block that overflows it is
-    // genuine corruption, surfaced as a decode error rather than silently grown.
-    #[cfg(feature = "lz4")]
-    let mut lz4_buf: Vec<u8> = if algo.eq_ignore_ascii_case(&b'q') {
-        let seed = if block_size > 0 {
-            block_size.min(MAX_BLOCK_SIZE) as usize
+    // Reusable destination buffer for the raw block codecs (lz4, lzo): their
+    // blocks carry no uncompressed size, so each decodes into a buffer seeded to
+    // the declared block size, or to cover dar's default (240 KiB) when the
+    // archive records none — a block that overflows it is genuine corruption,
+    // surfaced as a decode error rather than silently grown.
+    #[cfg(any(feature = "lz4", feature = "lzo"))]
+    let mut raw_block_buf: Vec<u8> =
+        if matches!(algo.to_ascii_lowercase(), b'q' | b'l' | b'j' | b'k') {
+            let seed = if block_size > 0 {
+                block_size.min(MAX_BLOCK_SIZE) as usize
+            } else {
+                256 * 1024
+            };
+            vec![0u8; seed]
         } else {
-            256 * 1024
+            Vec::new()
         };
-        vec![0u8; seed]
-    } else {
-        Vec::new()
-    };
 
     loop {
         let typ = read_u8(&mut input)
@@ -973,11 +980,12 @@ fn decode_blocks<W: Write>(
                     .map_err(|_| DarError::Corrupt("truncated compressed block".into()))?;
                 match algo.to_ascii_lowercase() {
                     #[cfg(feature = "lz4")]
-                    b'q' => decode_lz4_block(&block, &mut lz4_buf, out)?,
-                    b'l' | b'j' | b'k' => {
-                        return Err(DarError::Corrupt("lzo compression is not supported".into()));
-                    }
-                    // gzip/bzip2/xz/zstd block = a complete self-delimiting stream.
+                    b'q' => decode_lz4_block(&block, &mut raw_block_buf, out)?,
+                    #[cfg(feature = "lzo")]
+                    b'l' | b'j' | b'k' => decode_lzo_block(&block, &mut raw_block_buf, out)?,
+                    // gzip/bzip2/xz/zstd block = a complete self-delimiting stream;
+                    // a recognised-but-disabled codec lands here too and is refused
+                    // by decode_stream with a clear "not supported in this build".
                     _ => decode_stream(&block[..], algo, out)?,
                 }
             }
@@ -997,6 +1005,19 @@ fn decode_blocks<W: Write>(
 fn decode_lz4_block<W: Write>(block: &[u8], buf: &mut [u8], out: &mut W) -> Result<(), DarError> {
     let n = lz4_flex::block::decompress_into(block, buf)
         .map_err(|e| DarError::Corrupt(format!("lz4 block decode failed: {e}")))?;
+    out.write_all(&buf[..n])?;
+    Ok(())
+}
+
+/// Decompress one raw lzo1x block into `out` using `buf` (sized to the block
+/// size) as the destination. A block that does not fit, or is not a valid lzo1x
+/// block, is a decode error — dar never writes a block larger than the archive's
+/// block size, and the [`lzo`] decoder is bounds-checked, so malformed input
+/// surfaces as a typed error rather than a panic.
+#[cfg(feature = "lzo")]
+fn decode_lzo_block<W: Write>(block: &[u8], buf: &mut [u8], out: &mut W) -> Result<(), DarError> {
+    let n = lzo::decompress_into(block, buf)
+        .map_err(|e| DarError::Corrupt(format!("lzo block decode failed: {e}")))?;
     out.write_all(&buf[..n])?;
     Ok(())
 }

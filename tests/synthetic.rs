@@ -175,10 +175,12 @@ fn no_catalog_escape_returns_corrupt() {
 
 // ── extract: unsupported codec ────────────────────────────────────────────────
 
+// Without the `lzo` feature, lzo ('l') is recognised but not decoded; extraction
+// must fail loudly rather than return compressed bytes. (With lzo compiled in —
+// the default — 'l' is decodable; see real_images.rs's lzo fixture test.)
+#[cfg(not(feature = "lzo"))]
 #[test]
 fn extract_unsupported_codec_returns_corrupt() {
-    // lzo ('l') is a recognised dar compression algorithm this reader does not
-    // decode; extraction must fail loudly rather than return compressed bytes.
     let dar = minimal_dar(vec![file_entry("data.lzo", 0, b'l', 0, 0)]);
     let mut r = DarReader::open(Cursor::new(dar)).expect("open");
     assert!(matches!(r.extract("data.lzo"), Err(DarError::Corrupt(_))));
@@ -952,7 +954,13 @@ fn e2e_inplace_path_without_nul_is_length_capped() {
 /// A format-11.3 archive with a stored ('n') catalogue (so it lists) holding one
 /// entry whose data is the caller's `blob`, compressed with `comp`, declaring
 /// `declared_size` uncompressed bytes.
-#[cfg(any(feature = "gzip", feature = "xz", feature = "zstd", feature = "lz4"))]
+#[cfg(any(
+    feature = "gzip",
+    feature = "xz",
+    feature = "zstd",
+    feature = "lz4",
+    feature = "lzo"
+))]
 fn dar_with_compressed_entry(comp: u8, blob: &[u8], declared_size: u32) -> Vec<u8> {
     let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b];
     buf.extend_from_slice(&[0u8; 10]); // label
@@ -1333,6 +1341,11 @@ fn audit_flags_incomplete_catalog() {
     ));
 }
 
+// Without the `lzo` feature, an lzo ('l') entry is recognised but not decodable,
+// so audit flags it. With lzo compiled in (the default) nothing here is
+// unsupported; the lean-build refusal contract is covered by the codec-feature
+// tests below.
+#[cfg(not(feature = "lzo"))]
 #[test]
 fn audit_flags_unsupported_codec() {
     let dar = minimal_dar(vec![file_entry("blob.lzo", 0, b'l', 0, 0)]);
@@ -1785,7 +1798,7 @@ fn zstd_entry_extracts_to_plaintext() {
 // A 'q' (lz4) or 'l' (lzo) codec forces per-block framing, so a crafted block
 // stream as entry data exercises decode_blocks' corruption guards via extract().
 
-#[cfg(feature = "lz4")]
+#[cfg(any(feature = "lz4", feature = "lzo"))]
 fn extract_block_entry(block_stream: &[u8], comp: u8) -> DarError {
     let dar = dar_with_compressed_entry(comp, block_stream, 64);
     DarReader::open(Cursor::new(dar))
@@ -1837,10 +1850,12 @@ fn block_unknown_type_is_corrupt() {
     );
 }
 
-#[cfg(feature = "lz4")]
+#[cfg(feature = "lzo")]
 #[test]
-fn block_lzo_codec_is_unsupported() {
-    // A well-formed H_DATA block under the lzo codec reaches the unsupported arm.
+fn block_lzo_malformed_is_corrupt() {
+    // A well-formed H_DATA frame whose 2-byte payload is not a valid lzo1x block
+    // (lzo1x needs >= 3 bytes): the bounds-checked decoder surfaces a typed error
+    // as Corrupt rather than panicking.
     let err = extract_block_entry(&[0x01, 0x80, 0x00, 0x00, 0x00, 0x02, 0xAA, 0xBB], b'l');
     assert!(
         matches!(&err, DarError::Corrupt(s) if s.contains("lzo")),

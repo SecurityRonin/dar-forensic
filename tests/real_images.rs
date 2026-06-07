@@ -369,7 +369,8 @@ fn extract_missing_path_returns_err() {
     feature = "bzip2",
     feature = "xz",
     feature = "zstd",
-    feature = "lz4"
+    feature = "lz4",
+    feature = "lzo"
 ))]
 const PAYLOAD_LINE: &str = "dar-forensic gzip bzip2 xz roundtrip corpus line padding 0123456789\n";
 
@@ -378,7 +379,8 @@ const PAYLOAD_LINE: &str = "dar-forensic gzip bzip2 xz roundtrip corpus line pad
     feature = "bzip2",
     feature = "xz",
     feature = "zstd",
-    feature = "lz4"
+    feature = "lz4",
+    feature = "lzo"
 ))]
 fn expected_payload() -> Vec<u8> {
     PAYLOAD_LINE.repeat(2000).into_bytes()
@@ -389,7 +391,8 @@ fn expected_payload() -> Vec<u8> {
     feature = "bzip2",
     feature = "xz",
     feature = "zstd",
-    feature = "lz4"
+    feature = "lz4",
+    feature = "lzo"
 ))]
 fn open_fixture(name: &str) -> DarReader<Cursor<Vec<u8>>> {
     let path = format!("{DATA_DIR}/{name}");
@@ -444,7 +447,8 @@ fn gzip_extracts_stored_small_file() {
     feature = "bzip2",
     feature = "xz",
     feature = "zstd",
-    feature = "lz4"
+    feature = "lz4",
+    feature = "lzo"
 ))]
 fn assert_compressed_fixture(name: &str) {
     let r = open_fixture(name);
