@@ -952,7 +952,7 @@ fn e2e_inplace_path_without_nul_is_length_capped() {
 /// A format-11.3 archive with a stored ('n') catalogue (so it lists) holding one
 /// entry whose data is the caller's `blob`, compressed with `comp`, declaring
 /// `declared_size` uncompressed bytes.
-#[cfg(any(feature = "gzip", feature = "xz", feature = "zstd"))]
+#[cfg(any(feature = "gzip", feature = "xz", feature = "zstd", feature = "lz4"))]
 fn dar_with_compressed_entry(comp: u8, blob: &[u8], declared_size: u32) -> Vec<u8> {
     let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b];
     buf.extend_from_slice(&[0u8; 10]); // label
@@ -1779,4 +1779,71 @@ fn zstd_entry_extracts_to_plaintext() {
     let dar = dar_with_compressed_entry(b'd', ZSTD_FRAME, expected.len() as u32);
     let mut r = DarReader::open(Cursor::new(dar)).expect("open");
     assert_eq!(r.extract("c").expect("extract zstd entry"), expected);
+}
+
+// ── block_compressor decode guards ────────────────────────────────────────────
+// A 'q' (lz4) or 'l' (lzo) codec forces per-block framing, so a crafted block
+// stream as entry data exercises decode_blocks' corruption guards via extract().
+
+#[cfg(feature = "lz4")]
+fn extract_block_entry(block_stream: &[u8], comp: u8) -> DarError {
+    let dar = dar_with_compressed_entry(comp, block_stream, 64);
+    DarReader::open(Cursor::new(dar))
+        .expect("open")
+        .extract("c")
+        .unwrap_err()
+}
+
+#[cfg(feature = "lz4")]
+#[test]
+fn block_eof_with_nonzero_size_is_corrupt() {
+    // H_EOF (type 2) must carry size 0.
+    let err = extract_block_entry(&[0x02, 0x80, 0x00, 0x00, 0x00, 0x05], b'q');
+    assert!(
+        matches!(&err, DarError::Corrupt(s) if s.contains("end-of-blocks")),
+        "{err:?}"
+    );
+}
+
+#[cfg(feature = "lz4")]
+#[test]
+fn block_zero_size_data_is_corrupt() {
+    // H_DATA (type 1) with size 0.
+    let err = extract_block_entry(&[0x01, 0x80, 0x00, 0x00, 0x00, 0x00], b'q');
+    assert!(
+        matches!(&err, DarError::Corrupt(s) if s.contains("zero-size")),
+        "{err:?}"
+    );
+}
+
+#[cfg(feature = "lz4")]
+#[test]
+fn block_size_exceeding_input_is_corrupt() {
+    // H_DATA claiming 1000 bytes with none remaining.
+    let err = extract_block_entry(&[0x01, 0x80, 0x00, 0x00, 0x03, 0xE8], b'q');
+    assert!(
+        matches!(&err, DarError::Corrupt(s) if s.contains("exceeds remaining input")),
+        "{err:?}"
+    );
+}
+
+#[cfg(feature = "lz4")]
+#[test]
+fn block_unknown_type_is_corrupt() {
+    let err = extract_block_entry(&[0x63, 0x80, 0x00, 0x00, 0x00, 0x00], b'q');
+    assert!(
+        matches!(&err, DarError::Corrupt(s) if s.contains("unknown compressed block type")),
+        "{err:?}"
+    );
+}
+
+#[cfg(feature = "lz4")]
+#[test]
+fn block_lzo_codec_is_unsupported() {
+    // A well-formed H_DATA block under the lzo codec reaches the unsupported arm.
+    let err = extract_block_entry(&[0x01, 0x80, 0x00, 0x00, 0x00, 0x02, 0xAA, 0xBB], b'l');
+    assert!(
+        matches!(&err, DarError::Corrupt(s) if s.contains("lzo")),
+        "{err:?}"
+    );
 }

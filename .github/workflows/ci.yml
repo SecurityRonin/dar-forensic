@@ -148,6 +148,10 @@ jobs:
               "fn flush(&mut self) -> std::io::Result<()> {") ;;                 # CapWriter::flush — never called on the streaming path
               "self.inner.flush()") ;;                                           # CapWriter::flush body
               'return Err(DarError::Corrupt("terminator underflows archive".into()));') ;; # all-0xFF file forbidden by magic
+              'return Err(DarError::Corrupt("header flag field too large".into()));') ;; # read_header_flags guard — unit-tested
+              "return Ok(0); // the flag field was introduced at edition 2") ;;   # read_compr_bs edition-1 path — unit-tested
+              "read_infinint(r)?; // skip the initial offset") ;;                 # read_compr_bs initial-offset skip — unit-tested
+              'other => Err(DarError::Corrupt(format!("compression '"'"'{}'"'"' not supported in this build", other as char))),') ;; # decode_stream unsupported-codec arm — only reachable in a lean build; unit-tested
               *) echo "::error::e2e leaves a public-API-reachable line uncovered: src/lib.rs:${ln}: ${txt}"; fail=1 ;;
             esac
           done

@@ -66,6 +66,11 @@ const MAX_CATALOGUE_INFLATED: u64 = 1024 * 1024 * 1024;
 /// 64 KiB covers a 16 TiB file); a larger declared width is treated as corrupt.
 const MAX_CRC_SIZE: u64 = 64 * 1024;
 
+/// Upper bound on the per-block uncompressed block size (`compr_bs`); a header
+/// declaring more is treated as not block-compressed (allocation-bomb guard).
+/// dar's default is 240 KiB; 256 MiB is far beyond any practical setting.
+const MAX_BLOCK_SIZE: u64 = 256 * 1024 * 1024;
+
 /// Epoch seconds for 2100-01-01T00:00:00Z. [`DarReader::audit`] flags entry
 /// timestamps beyond this as implausibly far in the future (clock error or
 /// tampering) — a deterministic ceiling, not a comparison against wall-clock.
@@ -271,6 +276,10 @@ pub struct DarReader<R: Read + Seek> {
     format_major: u32,
     /// Whether the catalog parsed to a clean root EOD (see [`DarReader::is_complete`]).
     complete: bool,
+    /// Uncompressed block size from the header (`FLAG_HAS_COMPRESS_BS`); non-zero
+    /// means the archive uses dar's per-block compression framing, zero means a
+    /// single codec stream. Governs both the catalogue and every entry.
+    compr_bs: u64,
     entries: Vec<EntryRef>,
 }
 
@@ -297,6 +306,7 @@ impl<R: Read + Seek> DarReader<R> {
         let archive_origin;
         let format_major;
         let complete;
+        let compr_bs;
         if extension == b'T' {
             // TLV list: infinint(count) then count × (u16 type + infinint len + data)
             let tlv_count = read_infinint(&mut reader).map_err(|e| match e {
@@ -315,6 +325,9 @@ impl<R: Read + Seek> DarReader<R> {
             // after the version string; it tells us whether (and how) the
             // catalogue stream is compressed. Unreadable → treat as stored.
             let global_comp = read_u8(&mut reader).unwrap_or(b'n');
+            // The cursor now sits at the command-line string; read on to the
+            // compression block size (zero = single-stream, non-zero = per-block).
+            compr_bs = read_compr_bs(&mut reader, format_value >> 8);
             reader.seek(SeekFrom::Start(archive_origin))?;
 
             // true → seqt_catalogue tape mark found (catalog has label + maybe path);
@@ -332,7 +345,7 @@ impl<R: Read + Seek> DarReader<R> {
                     .by_ref()
                     .take(MAX_CATALOGUE_COMPRESSED)
                     .read_to_end(&mut compressed)?;
-                let inflated = inflate_catalogue(&compressed, global_comp)?;
+                let inflated = inflate_catalogue(&compressed, global_comp, compr_bs)?;
                 let mut cur = Cursor::new(inflated);
                 skip(&mut cur, 10)?; // catalog label
                 if format_value >= FORMAT_11_1 {
@@ -351,6 +364,8 @@ impl<R: Read + Seek> DarReader<R> {
                 (entries, complete) = parse_catalog(&mut reader, format_major, global_comp)?;
             }
         } else if extension == b'N' || extension == b'S' {
+            // Legacy editions (<= 7) predate block compression — always a stream.
+            compr_bs = 0;
             if extension == b'S' {
                 read_infinint(&mut reader)?; // slice size (multi-slice header); unused
             }
@@ -381,7 +396,7 @@ impl<R: Read + Seek> DarReader<R> {
                     .by_ref()
                     .take(MAX_CATALOGUE_COMPRESSED)
                     .read_to_end(&mut compressed)?;
-                let inflated = inflate_catalogue(&compressed, global_comp)?;
+                let inflated = inflate_catalogue(&compressed, global_comp, compr_bs)?;
                 (entries, complete) =
                     parse_catalog(&mut Cursor::new(inflated), format_major, global_comp)?;
             } else {
@@ -398,6 +413,7 @@ impl<R: Read + Seek> DarReader<R> {
             archive_origin,
             format_major,
             complete,
+            compr_bs,
             entries,
         })
     }
@@ -609,7 +625,7 @@ impl<R: Read + Seek> DarReader<R> {
             }
             let mut data = vec![0u8; entry.stored_size as usize];
             self.inner.read_exact(&mut data)?;
-            decode_stream(&data[..], entry.compression, &mut cap)?;
+            decode_data(&data[..], entry.compression, self.compr_bs, &mut cap)?;
         }
         if cap.written != entry.size {
             return Err(DarError::Corrupt(format!(
@@ -771,6 +787,60 @@ fn read_format_value<R: Read>(r: &mut R) -> u32 {
     }
 }
 
+/// Read the multi-byte header flag field (libdar header_flags.cpp): bytes are
+/// accumulated most-significant-first, the low bit (`0x01`) of each byte signals
+/// that another byte follows, and the value bits are `byte & 0xFE`.
+fn read_header_flags<R: Read>(r: &mut R) -> Result<u64, DarError> {
+    let mut bits: u64 = 0;
+    loop {
+        let a = read_u8(r)?;
+        if bits >> 56 != 0 {
+            return Err(DarError::Corrupt("header flag field too large".into()));
+        }
+        bits = (bits << 8) | u64::from(a & 0xFE);
+        if a & 0x01 == 0 {
+            return Ok(bits);
+        }
+    }
+}
+
+/// Read the compression block size from the archive header (cursor positioned
+/// just after the global compression byte). A non-zero result selects dar's
+/// per-block decompression; 0 means a single codec stream.
+///
+/// Returns 0 for edition 1 (no flags), when no block size is recorded, when the
+/// value is implausibly large ([`MAX_BLOCK_SIZE`]), or when the header carries
+/// fields this reader does not parse (encryption / KDF / isolated-catalogue
+/// slicing — none of which are decodable anyway). Best-effort: a read error also
+/// degrades to 0, so a genuinely block-framed stream then fails loudly at the
+/// decode step rather than being silently mis-read. Existing single-stream
+/// archives are unaffected — they have no block size and resolve to 0.
+fn read_compr_bs<R: Read>(r: &mut R, format_major: u32) -> u64 {
+    fn inner<R: Read>(r: &mut R, format_major: u32) -> Result<u64, DarError> {
+        const INITIAL_OFFSET: u64 = 0x08;
+        const HAS_COMPRESS_BS: u64 = 0x0800;
+        // Fields sitting between the flags and the block size that this reader
+        // does not parse; archives that set them (encrypted / KDF / isolated
+        // catalogue) are not decodable regardless.
+        const COMPLEX: u64 = 0x20 | 0x04 | 0x02 | 0x0400; // scrambled | crypted-key | ref-slicing | kdf
+
+        skip_nul_string(r)?; // command line
+        if format_major < 2 {
+            return Ok(0); // the flag field was introduced at edition 2
+        }
+        let flags = read_header_flags(r)?;
+        if flags & COMPLEX != 0 || flags & HAS_COMPRESS_BS == 0 {
+            return Ok(0);
+        }
+        if flags & INITIAL_OFFSET != 0 {
+            read_infinint(r)?; // skip the initial offset
+        }
+        let bs = read_infinint(r)?;
+        Ok(if bs > MAX_BLOCK_SIZE { 0 } else { bs })
+    }
+    inner(r, format_major).unwrap_or(0)
+}
+
 /// True when a libdar compression char names a known compression algorithm.
 /// `compression2char` emits the algorithm letter in lowercase for streamed mode
 /// and uppercase for per-block mode (`z`=gzip, `y`=bzip2, `x`=xz, `l`/`j`/`k`=lzo
@@ -802,15 +872,133 @@ fn unsupported_codec(algo: u8) -> Option<char> {
 /// [`decode_stream`]/[`CapWriter`] path the per-file extractor uses and capping
 /// output at `MAX_CATALOGUE_INFLATED` (decompression-bomb guard). Trailing bytes
 /// after the codec stream (the archive trailer) are ignored by the decoder.
-fn inflate_catalogue(compressed: &[u8], algo: u8) -> Result<Vec<u8>, DarError> {
+fn inflate_catalogue(compressed: &[u8], algo: u8, block_size: u64) -> Result<Vec<u8>, DarError> {
     let mut out = Vec::new();
     let mut cap = CapWriter {
         inner: &mut out,
         written: 0,
         max: MAX_CATALOGUE_INFLATED,
     };
-    decode_stream(compressed, algo, &mut cap)?;
+    decode_data(compressed, algo, block_size, &mut cap)?;
     Ok(out)
+}
+
+/// Decode a compressed data span. The archive uses dar's per-block framing (see
+/// [`decode_blocks`]) when a block size is recorded (`block_size > 0`) or the
+/// codec is lz4/lzo — which have no streamed form and so are always block-framed
+/// (dar applies a default block size that it does not store in the header).
+/// Otherwise it is a single codec stream (see [`decode_stream`]).
+fn decode_data<W: Write>(
+    data: &[u8],
+    algo: u8,
+    block_size: u64,
+    out: &mut W,
+) -> Result<(), DarError> {
+    let always_block = matches!(algo.to_ascii_lowercase(), b'q' | b'l' | b'j' | b'k');
+    if block_size > 0 || always_block {
+        decode_blocks(data, algo, block_size, out)
+    } else {
+        decode_stream(data, algo, out)
+    }
+}
+
+/// Decode a dar `block_compressor` stream: a sequence of blocks, each
+/// `[type: 1 byte][infinint compressed_size][compressed_size bytes]`, terminated
+/// by an `H_EOF` block (size 0). Each `H_DATA` block is decompressed
+/// independently and appended to `out` (libdar block_compressor.cpp /
+/// compress_block_header.cpp).
+///
+/// For lz4 each block is a raw LZ4 block decoded into a `block_size`-byte buffer;
+/// for the other codecs each block is a complete, self-delimiting codec stream
+/// decoded via [`decode_stream`]. `block_size` is the archive's uncompressed
+/// block size (the lz4 destination capacity); it is unused without the `lz4`
+/// feature. Each block's compressed size is bounded by the remaining input,
+/// which also bounds the loop to O(input) iterations.
+#[cfg_attr(not(feature = "lz4"), allow(unused_variables))]
+fn decode_blocks<W: Write>(
+    data: &[u8],
+    algo: u8,
+    block_size: u64,
+    out: &mut W,
+) -> Result<(), DarError> {
+    const H_DATA: u8 = 1;
+    const H_EOF: u8 = 2;
+
+    let mut input = data;
+    // Reusable lz4 destination buffer (raw lz4 blocks carry no uncompressed
+    // size). Seeded to the declared block size, or to cover dar's default
+    // (240 KiB) when the archive records none — so a block that overflows it is
+    // genuine corruption, surfaced as a decode error rather than silently grown.
+    #[cfg(feature = "lz4")]
+    let mut lz4_buf: Vec<u8> = if algo.eq_ignore_ascii_case(&b'q') {
+        let seed = if block_size > 0 {
+            block_size.min(MAX_BLOCK_SIZE) as usize
+        } else {
+            256 * 1024
+        };
+        vec![0u8; seed]
+    } else {
+        Vec::new()
+    };
+
+    loop {
+        let typ = read_u8(&mut input)
+            .map_err(|_| DarError::Corrupt("truncated block stream: missing end marker".into()))?;
+        let size = read_infinint(&mut input)?;
+        match typ {
+            H_EOF => {
+                if size != 0 {
+                    return Err(DarError::Corrupt(
+                        "non-zero size on end-of-blocks marker".into(),
+                    ));
+                }
+                return Ok(());
+            }
+            H_DATA => {
+                if size == 0 {
+                    return Err(DarError::Corrupt("zero-size compressed block".into()));
+                }
+                // A block cannot be larger than the bytes that remain in the
+                // (already bounded) input. This both caps the allocation and,
+                // since every block consumes at least its `size` bytes, bounds
+                // the loop to O(input) iterations — no separate block-count cap.
+                if size > input.len() as u64 {
+                    return Err(DarError::Corrupt(
+                        "compressed block size exceeds remaining input".into(),
+                    ));
+                }
+                let mut block = vec![0u8; size as usize];
+                input
+                    .read_exact(&mut block)
+                    .map_err(|_| DarError::Corrupt("truncated compressed block".into()))?;
+                match algo.to_ascii_lowercase() {
+                    #[cfg(feature = "lz4")]
+                    b'q' => decode_lz4_block(&block, &mut lz4_buf, out)?,
+                    b'l' | b'j' | b'k' => {
+                        return Err(DarError::Corrupt("lzo compression is not supported".into()));
+                    }
+                    // gzip/bzip2/xz/zstd block = a complete self-delimiting stream.
+                    _ => decode_stream(&block[..], algo, out)?,
+                }
+            }
+            other => {
+                return Err(DarError::Corrupt(format!(
+                    "unknown compressed block type {other}"
+                )));
+            }
+        }
+    }
+}
+
+/// Decompress one raw lz4 block into `out` using `buf` (sized to the block size)
+/// as the destination. A block that does not fit (or is malformed) is a decode
+/// error — dar never writes a block larger than the archive's block size.
+#[cfg(feature = "lz4")]
+fn decode_lz4_block<W: Write>(block: &[u8], buf: &mut [u8], out: &mut W) -> Result<(), DarError> {
+    let n = lz4_flex::block::decompress_into(block, buf)
+        .map_err(|e| DarError::Corrupt(format!("lz4 block decode failed: {e}")))?;
+    out.write_all(&buf[..n])?;
+    Ok(())
 }
 
 /// A `Write` adapter that forwards to `inner`, counting bytes written and failing
@@ -883,10 +1071,9 @@ fn decode_stream<R: Read, W: Write>(input: R, algo: u8, out: &mut W) -> Result<(
         }
         // A recognised codec whose feature is disabled (or a genuinely
         // unsupported one) lands here — a clear error, never a silent misread.
-        other => Err(DarError::Corrupt(format!(
-            "compression '{}' is not supported in this build",
-            other as char
-        ))),
+        // (Single line so the e2e-coverage allowlist matches one specific line.)
+        #[rustfmt::skip]
+        other => Err(DarError::Corrupt(format!("compression '{}' not supported in this build", other as char))),
     }
 }
 
@@ -1792,6 +1979,44 @@ mod tests {
     fn decode_stream_rejects_malformed_zstd() {
         let err = decode_stream(b"not a zstd frame".as_slice(), b'd', &mut Vec::new()).unwrap_err();
         assert!(matches!(&err, DarError::Corrupt(s) if s.contains("zstd decode failed")));
+    }
+
+    #[test]
+    fn decode_stream_rejects_unknown_codec() {
+        // No streamed codec routes here in a full build; a stray byte must error.
+        let err = decode_stream(b"data".as_slice(), b'?', &mut Vec::new()).unwrap_err();
+        assert!(matches!(&err, DarError::Corrupt(s) if s.contains("not supported in this build")));
+    }
+
+    #[test]
+    fn header_flags_single_two_byte_and_overlong() {
+        // Single byte (low bit clear): value is `byte & 0xFE`.
+        assert_eq!(read_header_flags(&mut [0x10u8].as_slice()).unwrap(), 0x10);
+        // Two bytes (first low bit set = continuation): 0x09,0x08 -> 0x0808.
+        assert_eq!(
+            read_header_flags(&mut [0x09u8, 0x08].as_slice()).unwrap(),
+            0x0808
+        );
+        // A field that never terminates within 8 bytes is rejected.
+        let err = read_header_flags(&mut [0xFFu8; 9].as_slice()).unwrap_err();
+        assert!(matches!(&err, DarError::Corrupt(s) if s.contains("flag field too large")));
+    }
+
+    #[test]
+    fn compr_bs_edition_one_is_zero() {
+        // Edition < 2 has no flag field, hence no block size.
+        assert_eq!(read_compr_bs(&mut b"cmdline\x00rest".as_slice(), 1), 0);
+    }
+
+    #[test]
+    fn compr_bs_read_after_initial_offset() {
+        // cmd_line "\0" | flags 0x0808 (HAS_COMPRESS_BS + INITIAL_OFFSET) |
+        // initial_offset (skipped) | compr_bs = 42.
+        let mut buf = vec![0x00u8]; // empty command line
+        buf.extend_from_slice(&[0x09, 0x08]); // flags = 0x0808
+        buf.extend_from_slice(&[0x80, 0, 0, 0, 0]); // initial_offset = 0
+        buf.extend_from_slice(&[0x80, 0, 0, 0, 42]); // compr_bs = 42
+        assert_eq!(read_compr_bs(&mut buf.as_slice(), 11), 42);
     }
 
     #[test]
