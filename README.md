@@ -56,7 +56,7 @@ DAR is a C++ format; the reference implementation (`libdar`) is GPL with C bindi
 | Reads DAR formats 1–11 | ✅ | ✅ (1 + 7–11 validated against real archives) |
 | Tape-marks-disabled archives (Passware / mobile) | ✅ | ✅ |
 | Random-access extraction (`Read + Seek`) | ✅ | ✅ — composes with `ewf`, `vmdk`, … |
-| Transparent gzip / bzip2 / xz decompression | ✅ | ✅ — pure-Rust decoders, no C |
+| Transparent gzip / bzip2 / xz / zstd decompression | ✅ | ✅ — pure-Rust decoders, no C |
 | Tail-scan for 90+ GiB archives (≈107 MiB read, not 99 GiB) | — | ✅ |
 | Forensic anomaly audit (`audit()` → severity-graded findings) | — | ✅ — incomplete catalogue, path-traversal, undecodable codec, … (serde-exportable) |
 | Timeline export (Sleuth Kit bodyfile → `mactime`) | — | ✅ — `write_bodyfile()` straight from the catalogue |
@@ -87,8 +87,8 @@ The format version is the header `version_string`, each byte `value + 48` (`"090
 ### Scope and limits
 
 - **Read-only** — does not create or modify archives.
-- **Decompression: gzip, bzip2, xz** — these are transparently inflated for both the compressed catalog and extracted entry data (pure-Rust decoders, bounded against decompression bombs). Archives using lzo, zstd or lz4 are recognised but not yet decoded; encrypted entries are *listed* but `extract()` returns a clear error rather than wrong bytes — decryption is out of scope.
-- **Lean build** — the three codecs are default-on Cargo features (`gzip`, `bzip2`, `xz`). For a reader of *stored* archives (e.g. the uncompressed Passware corpus) with zero codec dependencies, build with `default-features = false`. A codec you leave out is still recognised: its entries list and are flagged by `audit()`, and `extract()` refuses them rather than mis-decoding.
+- **Decompression: gzip, bzip2, xz, zstd** — these are transparently inflated for both the compressed catalog and extracted entry data (pure-Rust decoders, bounded against decompression bombs). Archives using lzo or lz4 are recognised but not yet decoded (dar writes those as per-block raw streams); encrypted entries are *listed* but `extract()` returns a clear error rather than wrong bytes — decryption is out of scope.
+- **Lean build** — the four codecs are default-on Cargo features (`gzip`, `bzip2`, `xz`, `zstd`). For a reader of *stored* archives (e.g. the uncompressed Passware corpus) with zero codec dependencies, build with `default-features = false`. A codec you leave out is still recognised: its entries list and are flagged by `audit()`, and `extract()` refuses them rather than mis-decoding.
 - **CRC verification** — `verify(path)` recomputes libdar's per-file CRC over the decompressed data and compares it to the value stored in the catalogue, returning `Match`, `Mismatch { stored, computed }`, or `NotStored` (edition-1 archives record no CRC). It never withholds the bytes: data that fails its CRC can still be `extract`ed for analysis of the corruption.
 
 ## Security

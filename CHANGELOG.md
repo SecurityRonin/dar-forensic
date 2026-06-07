@@ -8,6 +8,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **zstd decompression.** Entries (and catalogues) compressed with dar's
+  streamed zstd codec are now transparently decoded via the pure-Rust `ruzstd`
+  crate, behind a default-on `zstd` feature alongside `gzip`/`bzip2`/`xz`. dar's
+  streamed zstd is a standard zstd frame, so the decode is straightforward; lzo
+  and lz4 remain undecoded (dar writes those as per-block raw streams).
 - **`DarReader::entry_count()` and `iter_entries()`.** `entry_count()` returns
   the number of catalogue entries in O(1) without cloning the list; `iter_entries()`
   yields one `DarEntry` at a time so a streaming consumer over a large archive
