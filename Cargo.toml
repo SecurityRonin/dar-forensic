@@ -28,10 +28,11 @@ zstd = ["dep:ruzstd"]
 lz4 = ["dep:lz4_flex"]
 # Derive `serde::Serialize` on the public entry and `audit()` finding types for
 # JSON/structured export. Off by default — the core reader has no serde dep.
-serde = ["dep:serde"]
+serde = ["dep:serde", "forensicnomicon/serde"]
 
 [dependencies]
 thiserror = { workspace = true }
+forensicnomicon = { workspace = true }
 flate2    = { workspace = true, optional = true }
 bzip2-rs  = { workspace = true, optional = true }
 lzma-rs   = { workspace = true, optional = true }
@@ -52,6 +53,8 @@ resolver = "2"
 
 [workspace.dependencies]
 thiserror = "2"
+# Shared forensic report model — Severity / Finding / Observation.
+forensicnomicon = "0.3.1"
 tempfile  = "3"
 # Pure-Rust (miniz_oxide) zlib backend — dar's "gzip" is a raw zlib stream.
 flate2    = { version = "1", default-features = false, features = ["rust_backend"] }
