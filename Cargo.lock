@@ -74,6 +74,7 @@ dependencies = [
  "flate2",
  "lz4_flex",
  "lzma-rs",
+ "lzo",
  "ruzstd",
  "serde",
  "serde_json",
@@ -216,6 +217,12 @@ dependencies = [
  "byteorder",
  "crc",
 ]
+
+[[package]]
+name = "lzo"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5bd237666899fea8130a6842d85c89c6463af03a38be87de3f67a78a75c8f794"
 
 [[package]]
 name = "memchr"

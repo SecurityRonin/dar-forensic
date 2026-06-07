@@ -517,6 +517,15 @@ fn lz4_multiblock_lists_and_extracts() {
     assert_compressed_fixture("pb_lz4.dar");
 }
 
+// Default `dar -zlzo`: like lz4, lzo is always per-block framed (raw lzo1x
+// blocks). The lzo-compressed catalogue must inflate to list, and the payload
+// block must decode to extract. Real dar 2.8 archive (`dar -c -R src -zlzo`).
+#[cfg(feature = "lzo")]
+#[test]
+fn lzo_default_block_lists_and_extracts() {
+    assert_compressed_fixture("v11_lzo.dar");
+}
+
 // `dar -zgzip:6:1024` — per-block gzip (each block a complete zlib stream).
 #[cfg(feature = "gzip")]
 #[test]
