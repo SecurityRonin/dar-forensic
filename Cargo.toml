@@ -20,10 +20,11 @@ categories  = ["parser-implementations"]
 # Passware Kit Mobile corpus. A codec left disabled is still recognised: such an
 # entry is listed and flagged by `audit()`, and `extract()` returns a clear
 # error rather than wrong bytes.
-default = ["gzip", "bzip2", "xz"]
+default = ["gzip", "bzip2", "xz", "zstd"]
 gzip = ["dep:flate2"]
 bzip2 = ["dep:bzip2-rs"]
 xz = ["dep:lzma-rs"]
+zstd = ["dep:ruzstd"]
 # Derive `serde::Serialize` on the public entry and `audit()` finding types for
 # JSON/structured export. Off by default — the core reader has no serde dep.
 serde = ["dep:serde"]
@@ -33,6 +34,7 @@ thiserror = { workspace = true }
 flate2    = { workspace = true, optional = true }
 bzip2-rs  = { workspace = true, optional = true }
 lzma-rs   = { workspace = true, optional = true }
+ruzstd    = { workspace = true, optional = true }
 serde     = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -53,6 +55,8 @@ tempfile  = "3"
 flate2    = { version = "1", default-features = false, features = ["rust_backend"] }
 # Pure-Rust bzip2 decoder (decompress-only); keeps unsafe_code = "deny".
 bzip2-rs  = "0.1"
+# Pure-Rust zstd decoder (decompress-only); dar writes a standard zstd frame.
+ruzstd    = "0.7"
 # Pure-Rust xz/lzma decoder; keeps unsafe_code = "deny".
 lzma-rs   = "0.3"
 # Optional structured-output support for audit() findings (feature = "serde").

@@ -785,7 +785,7 @@ fn is_compressed(algo: u8) -> bool {
 }
 
 /// The codec character if `algo` names a compression this build cannot decode:
-/// always lzo (`l`/`j`/`k`), zstd (`d`), lz4 (`q`), plus gzip/bzip2/xz when their
+/// always lzo (`l`/`j`/`k`) and lz4 (`q`), plus gzip/bzip2/xz/zstd when their
 /// feature is disabled. Returns `None` for a decodable codec or a stored entry.
 /// The original case is preserved (uppercase = per-block) as evidence.
 fn unsupported_codec(algo: u8) -> Option<char> {

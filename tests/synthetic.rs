@@ -952,7 +952,7 @@ fn e2e_inplace_path_without_nul_is_length_capped() {
 /// A format-11.3 archive with a stored ('n') catalogue (so it lists) holding one
 /// entry whose data is the caller's `blob`, compressed with `comp`, declaring
 /// `declared_size` uncompressed bytes.
-#[cfg(any(feature = "gzip", feature = "xz"))]
+#[cfg(any(feature = "gzip", feature = "xz", feature = "zstd"))]
 fn dar_with_compressed_entry(comp: u8, blob: &[u8], declared_size: u32) -> Vec<u8> {
     let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b];
     buf.extend_from_slice(&[0u8; 10]); // label
@@ -1757,4 +1757,26 @@ fn iter_entries_matches_collected_entries() {
         .collect();
     assert_eq!(lazy, eager);
     assert_eq!(lazy, ["a.txt", "b.txt"]);
+}
+
+// ── zstd decode (feature = "zstd") ────────────────────────────────────────────
+
+/// A real standard zstd frame (zstd CLI v1.5.6) of the line below repeated 6×.
+/// dar's streamed zstd writes exactly this format (ZSTD_compressStream produces
+/// a standard frame — see compressor_zstd.cpp), so this is byte-faithful.
+#[cfg(feature = "zstd")]
+const ZSTD_FRAME: &[u8] = &[
+    0x28, 0xb5, 0x2f, 0xfd, 0x24, 0xf0, 0x8d, 0x01, 0x00, 0x84, 0x02, 0x64, 0x61, 0x72, 0x2d, 0x66,
+    0x6f, 0x72, 0x65, 0x6e, 0x73, 0x69, 0x63, 0x20, 0x7a, 0x73, 0x74, 0x64, 0x20, 0x64, 0x65, 0x63,
+    0x6f, 0x64, 0x65, 0x20, 0x72, 0x6f, 0x75, 0x6e, 0x64, 0x74, 0x72, 0x69, 0x70, 0x20, 0x6c, 0x69,
+    0x6e, 0x65, 0x0a, 0x01, 0x00, 0x28, 0x2e, 0x4a, 0x95, 0x01, 0x0a, 0x07, 0x45, 0x88,
+];
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zstd_entry_extracts_to_plaintext() {
+    let expected = b"dar-forensic zstd decode roundtrip line\n".repeat(6);
+    let dar = dar_with_compressed_entry(b'd', ZSTD_FRAME, expected.len() as u32);
+    let mut r = DarReader::open(Cursor::new(dar)).expect("open");
+    assert_eq!(r.extract("c").expect("extract zstd entry"), expected);
 }
