@@ -6,7 +6,9 @@ use forensicnomicon::report::{Observation, Source};
 
 #[test]
 fn anomaly_converts_to_a_canonical_finding() {
-    let a = Anomaly::new(AnomalyKind::IncompleteCatalog { entries_recovered: 3 });
+    let a = Anomaly::new(AnomalyKind::IncompleteCatalog {
+        entries_recovered: 3,
+    });
     let f = a.to_finding(Source {
         analyzer: "dar-forensic".to_string(),
         scope: "DAR".to_string(),
