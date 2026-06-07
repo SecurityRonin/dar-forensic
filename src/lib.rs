@@ -792,7 +792,8 @@ fn unsupported_codec(algo: u8) -> Option<char> {
     let lower = algo.to_ascii_lowercase();
     let decodable = (cfg!(feature = "gzip") && lower == b'z')
         || (cfg!(feature = "bzip2") && lower == b'y')
-        || (cfg!(feature = "xz") && lower == b'x');
+        || (cfg!(feature = "xz") && lower == b'x')
+        || (cfg!(feature = "zstd") && lower == b'd');
     let compressed = matches!(lower, b'z' | b'y' | b'x' | b'l' | b'j' | b'k' | b'd' | b'q');
     (compressed && !decodable).then_some(algo as char)
 }
@@ -869,6 +870,15 @@ fn decode_stream<R: Read, W: Write>(input: R, algo: u8, out: &mut W) -> Result<(
                     if m == "Unexpected data after last XZ block" => {}
                 Err(e) => return Err(DarError::Corrupt(format!("xz decode failed: {e}"))),
             }
+            Ok(())
+        }
+        #[cfg(feature = "zstd")]
+        b'd' => {
+            // dar's streamed zstd is a standard zstd frame (ZSTD_compressStream).
+            let mut dec = ruzstd::StreamingDecoder::new(input)
+                .map_err(|e| DarError::Corrupt(format!("zstd decode failed: {e}")))?;
+            std::io::copy(&mut dec, out)
+                .map_err(|e| DarError::Corrupt(format!("zstd decode failed: {e}")))?;
             Ok(())
         }
         // A recognised codec whose feature is disabled (or a genuinely
@@ -1775,6 +1785,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(&err, DarError::Corrupt(s) if s.contains("xz decode failed")));
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn decode_stream_rejects_malformed_zstd() {
+        let err = decode_stream(b"not a zstd frame".as_slice(), b'd', &mut Vec::new()).unwrap_err();
+        assert!(matches!(&err, DarError::Corrupt(s) if s.contains("zstd decode failed")));
     }
 
     #[test]
