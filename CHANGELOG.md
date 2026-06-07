@@ -8,6 +8,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **lz4 decompression and per-block (`block_compressor`) mode.** Archives that
+  compress data as a sequence of independent blocks — which dar always does for
+  lz4 (and lzo), and for any codec when a block size is set (`-z algo:lvl:bs`) —
+  are now decoded: lz4 blocks via the pure-Rust `lz4_flex` crate (default-on
+  `lz4` feature), and per-block gzip/bzip2/xz/zstd by decoding each block as its
+  own stream. Block size and mode are read from the archive header. lzo is still
+  recognised but not decoded (no pure-Rust lzo decoder).
 - **zstd decompression.** Entries (and catalogues) compressed with dar's
   streamed zstd codec are now transparently decoded via the pure-Rust `ruzstd`
   crate, behind a default-on `zstd` feature alongside `gzip`/`bzip2`/`xz`. dar's
