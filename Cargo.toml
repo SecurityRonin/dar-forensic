@@ -1,6 +1,6 @@
 [package]
 name        = "dar-forensic"
-version     = "0.4.0"
+version     = "0.5.0"
 edition     = "2021"
 rust-version = "1.85"
 description = "Forensic-grade reader for Denis Corbin DAR (Disk ARchiver) archives, including the Passware Kit Mobile variant; hardened and fuzz-tested against malicious input."

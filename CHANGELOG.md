@@ -4,7 +4,32 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] — 2026-06-07
+
+### Added
+
+- **lzo decompression.** Entries (and catalogues) compressed with dar's lzo
+  codec are now decoded via the pure-Rust, `#![forbid(unsafe_code)]`
+  [`lzo`](https://crates.io/crates/lzo) crate (default-on `lzo` feature) —
+  completing transparent support for every codec dar writes. lzo, like lz4, is
+  always per-block framed; each block is a raw lzo1x block decoded into a
+  block-sized buffer. Validated against a real `dar -zlzo` archive.
+
+### Fixed
+
+- `audit()` no longer reports lz4 entries as an unsupported codec when the `lz4`
+  feature is built in (they decode). `unsupported_codec` now feature-gates the
+  raw-block codecs (lz4, lzo) the same way as the streamed ones; a lean build
+  still recognises, refuses, and flags them.
+
+### Changed
+
+- CI coverage now measures the union of feature configurations — the
+  "unsupported codec" finding is reachable only in a lean build (a full build
+  decodes every codec) — and the e2e coverage gate is file-aware across
+  `src/lib.rs`, `src/findings.rs`, and `src/bodyfile.rs`.
+
+## [0.4.0] — 2026-06-07
 
 ### Added
 
