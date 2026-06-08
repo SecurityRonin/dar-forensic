@@ -368,8 +368,9 @@ fn catalog_without_escape_lists_entries() {
     // File data — use non-zero bytes so the label won't false-match in the body.
     buf.extend_from_slice(b"FFFFFFFFFFFFFFFF"); // 16 distinct bytes
 
-    // Catalog header: label only, no escape, no path NUL.
+    // Catalog: label + empty in-place path (format 11.1+), no escape.
     buf.extend_from_slice(&LABEL);
+    buf.push(0x00); // empty in-place path NUL-string (format 11.1+, as real dar writes)
     buf.extend(root_dir());
     buf.extend(file_entry("a.txt", 0, b'n', 0, 16));
     buf.push(EOD);
@@ -396,8 +397,9 @@ fn catalog_without_escape_extracts_correctly() {
 
     buf.extend_from_slice(b"HELLOWORLD"); // 10 bytes of payload at archive_origin
 
-    // Catalog: label only marker.
+    // Catalog: label + empty in-place path (format 11.1+).
     buf.extend_from_slice(&LABEL);
+    buf.push(0x00); // empty in-place path NUL-string (format 11.1+, as real dar writes)
     buf.extend(root_dir());
     buf.extend(file_entry("f.bin", 0, b'n', 0, 10));
     buf.push(EOD);

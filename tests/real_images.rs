@@ -747,11 +747,15 @@ fn slicereader_rejects_unknown_extension() {
 fn slicereader_rejects_slice_smaller_than_header() {
     let d = tempfile::tempdir().unwrap();
     let s1 = ms_write(d.path(), "s1", &[0u8; 32]);
-    // 'N' header is exactly 16 bytes — no room for the trailing flag byte.
-    let tiny = ms_hdr(b'N', &[]);
-    let s2 = ms_write(d.path(), "s2", &tiny);
+    // A NON-terminal 'N' slice that is exactly its 16-byte header has no room for
+    // the trailing flag byte every non-terminal slice must carry. (A header-only
+    // *terminal* slice is fine — it simply contributes no data.)
+    let s2 = ms_write(d.path(), "s2", &ms_hdr(b'N', &[]));
+    let mut last = ms_hdr(b'N', &[]);
+    last.extend_from_slice(&[1, 2, 3, b'T']);
+    let s3 = ms_write(d.path(), "s3", &last);
     assert!(matches!(
-        dar_forensic::SliceReader::open(&[s1, s2]),
+        dar_forensic::SliceReader::open(&[s1, s2, s3]),
         Err(dar_forensic::DarError::Corrupt(_))
     ));
 }

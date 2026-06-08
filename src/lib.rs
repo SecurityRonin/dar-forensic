@@ -316,10 +316,24 @@ impl<R: Read + Seek> DarReader<R> {
                 DarError::Io(_) => DarError::Corrupt("truncated TLV block".into()),
                 other => other,
             })?;
+            // The archive's data_name (TLV type 0x0003, a 10-byte label) is the
+            // identity the catalogue's ref_data_name points at. It is preserved
+            // when an archive is re-sliced (dar_xform) even though the slice's own
+            // internal_name changes, so it — not the slice label — locates a
+            // tape-marks-off catalogue. For a normally-created archive the two are
+            // identical, so this is a no-op there.
+            let mut data_name: Option<[u8; 10]> = None;
             for _ in 0..tlv_count {
-                skip(&mut reader, 2)?;
+                let mut typ = [0u8; 2];
+                reader.read_exact(&mut typ)?;
                 let len = read_infinint(&mut reader)?;
-                skip(&mut reader, len)?;
+                if typ == [0x00, 0x03] && len == 10 {
+                    let mut dn = [0u8; 10];
+                    reader.read_exact(&mut dn)?;
+                    data_name = Some(dn);
+                } else {
+                    skip(&mut reader, len)?;
+                }
             }
 
             archive_origin = reader.stream_position()?;
@@ -335,7 +349,7 @@ impl<R: Read + Seek> DarReader<R> {
 
             // true → seqt_catalogue tape mark found (catalog has label + maybe path);
             // false → located by its ref_data_name label (tape marks off, e.g. Passware).
-            let via_escape = find_catalogue(&mut reader, &label)?;
+            let via_escape = find_catalogue(&mut reader, data_name.as_ref().unwrap_or(&label))?;
             format_major = format_value >> 8;
             if via_escape && is_compressed(global_comp) {
                 // The catalogue is a single stream compressed with the archive
@@ -356,13 +370,16 @@ impl<R: Read + Seek> DarReader<R> {
                 }
                 (entries, complete) = parse_catalog(&mut cur, format_major, global_comp)?;
             } else {
+                // The catalogue opens with a 10-byte label and, from format 11.1,
+                // an in-place path NUL-string before the entries. When located by
+                // the seqt_catalogue escape the reader sits before the label; when
+                // located by ref_data_name match (tape marks off) scan_window has
+                // already consumed the matched label, so only the path remains.
                 if via_escape {
                     skip(&mut reader, 10)?; // catalog label
-                                            // The in-place path exists only from format 11.1
-                                            // (catalogue.cpp:157). Formats 8/9/10/11.0 have none.
-                    if format_value >= FORMAT_11_1 {
-                        skip_nul_string(&mut reader)?;
-                    }
+                }
+                if format_value >= FORMAT_11_1 {
+                    skip_nul_string(&mut reader)?;
                 }
                 (entries, complete) = parse_catalog(&mut reader, format_major, global_comp)?;
             }
@@ -842,16 +859,19 @@ impl SliceReader {
             } else {
                 slice_header_len(&mut file)?
             };
-            // libdar's SAR layer reserves the final byte of every slice for a flag
-            // ('N' = a slice follows, 'T' = terminal); it is not archive data, so
-            // the slice's contribution is the region between its header and that
-            // trailing flag byte.
-            if len < file_data_start + 1 {
+            // libdar's SAR layer ends every slice with a 1-byte flag ('N' = a slice
+            // follows, 'T' = terminal). On a non-terminal slice that flag sits in
+            // the middle of the file data and must be dropped; the terminal slice's
+            // flag is the archive's own final byte and is kept — so the logical
+            // stream ends byte-identically to an unsliced archive and the
+            // end-relative terminateur (tape-marks-off catalogues) still resolves.
+            let trailer = u64::from(i + 1 < paths.len());
+            if len < file_data_start + trailer {
                 return Err(DarError::Corrupt(
                     "slice smaller than its header + flag".into(),
                 ));
             }
-            let logical_len = len - file_data_start - 1;
+            let logical_len = len - file_data_start - trailer;
             slices.push(SliceSpan {
                 file,
                 file_data_start,
