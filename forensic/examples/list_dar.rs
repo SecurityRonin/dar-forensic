@@ -1,3 +1,7 @@
+// A runnable demo, not library production code: it prints a usage error and
+// exits via `expect`/`panic` rather than threading a Result through `main`.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use dar_forensic::DarReader;
 use std::env;
 use std::fs::File;

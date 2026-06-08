@@ -31,9 +31,9 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       # Also lint with the optional `serde` feature so its derives can't rot.
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     name: Test
@@ -42,9 +42,9 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
-      - run: cargo test
+      - run: cargo test --workspace
       # Exercise the optional `serde` feature (audit() JSON export).
-      - run: cargo test --all-features
+      - run: cargo test --workspace --all-features
 
   deny:
     name: Cargo Deny
@@ -60,7 +60,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@c56a35af9328d0bc581dc86c05e58f97f7c38a0e # 1.85
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
-      - run: cargo test
+      - run: cargo test --workspace
 
   fuzz-check:
     name: Fuzz (build check)
@@ -113,8 +113,9 @@ jobs:
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - run: cargo install cargo-llvm-cov --locked
       # All codecs are always compiled; only `serde` is optional, so a single
-      # --all-features run covers every library line.
-      - run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+      # --all-features run covers every library line across both workspace
+      # members (dar-core parser + dar-forensic analyzer).
+      - run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
       # Enforce 100% line coverage of the library. lcov DA:<line>,0 records mark
       # uncovered lines; any such record fails the gate. (lcov merges across
       # binaries correctly, unlike the --summary-only line metric.)
@@ -125,14 +126,16 @@ jobs:
             exit 1
           fi
           echo "100% line coverage ✓"
-      # The e2e suite (tests/, exercising only the public API) must independently
-      # cover every library line reachable through open()/extract()/audit(). A
-      # small, documented set of guards is unreachable through the public API and
-      # is covered by the unit suite instead; those are allowlisted below.
-      # File-aware (the report spans src/lib.rs, src/findings.rs, src/bodyfile.rs).
+      # The e2e suite (forensic/tests/, exercising only the public API) must
+      # independently cover every library line reachable through
+      # open()/extract()/audit(). A small, documented set of guards is
+      # unreachable through the public API and is covered by the unit suite
+      # instead; those are allowlisted below. File-aware (the report spans
+      # core/src/lib.rs, forensic/src/lib.rs, forensic/src/findings.rs,
+      # forensic/src/bodyfile.rs).
       - name: Enforce e2e (public-API) coverage
         run: |
-          cargo llvm-cov --all-features --test synthetic --test real_images --test canonical_finding_tests --lcov --output-path e2e.info
+          cargo llvm-cov --workspace --all-features --test synthetic --test real_images --test canonical_finding_tests --lcov --output-path e2e.info
           awk -F: '/^SF:/{f=$2} /^DA:[0-9]+,0$/{split($0,a,","); split(a[1],b,":"); print f" "b[2]}' e2e.info > /tmp/e2e_uncovered.txt
           fail=0
           while read -r file ln; do

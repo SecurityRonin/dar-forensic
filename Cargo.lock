@@ -67,20 +67,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "dar-forensic"
+name = "dar-core"
 version = "0.7.0"
 dependencies = [
  "bzip2-rs",
  "flate2",
- "forensicnomicon",
  "lz4_flex",
  "lzma-rs",
  "lzo",
  "ruzstd",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "dar-forensic"
+version = "0.7.0"
+dependencies = [
+ "dar-core",
+ "flate2",
+ "forensicnomicon",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

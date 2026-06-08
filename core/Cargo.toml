@@ -1,0 +1,42 @@
+[package]
+name        = "dar-core"
+version     = "0.7.0"
+edition     = "2021"
+rust-version = "1.85"
+description = "Pure-Rust read-only parser for Denis Corbin DAR (Disk ARchiver) archives, including the Passware Kit Mobile variant; hardened and fuzz-tested against malicious input."
+license     = "MIT"
+repository  = "https://github.com/SecurityRonin/dar-forensic"
+homepage    = "https://github.com/SecurityRonin/dar-forensic"
+documentation = "https://docs.rs/dar-core"
+authors     = ["Albert Hui"]
+keywords    = ["forensics", "dar", "archive", "passware", "backup"]
+categories  = ["parser-implementations"]
+
+[lib]
+name = "dar"
+
+[features]
+# All six decompression codecs (gzip, bzip2, xz, zstd, lz4, lzo) are always
+# compiled in — a forensic reader must be able to read every variant it
+# encounters, so they are not optional. The only optional feature is `serde`.
+default = []
+# Derive `serde::Serialize` on the public entry types for JSON/structured
+# export. Off by default — the core reader has no serde dep.
+serde = ["dep:serde"]
+
+[dependencies]
+thiserror = { workspace = true }
+flate2    = { workspace = true }
+bzip2-rs  = { workspace = true }
+lzma-rs   = { workspace = true }
+ruzstd    = { workspace = true }
+lz4_flex  = { workspace = true }
+lzo       = { workspace = true }
+serde     = { workspace = true, optional = true }
+
+[dev-dependencies]
+flate2     = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

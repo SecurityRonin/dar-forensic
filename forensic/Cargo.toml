@@ -1,0 +1,35 @@
+[package]
+name        = "dar-forensic"
+version     = "0.7.0"
+edition     = "2021"
+rust-version = "1.85"
+description = "Forensic-grade reader and anomaly auditor for Denis Corbin DAR (Disk ARchiver) archives, including the Passware Kit Mobile variant; hardened and fuzz-tested against malicious input. Built on dar-core."
+license     = "MIT"
+readme      = "../README.md"
+repository  = "https://github.com/SecurityRonin/dar-forensic"
+homepage    = "https://github.com/SecurityRonin/dar-forensic"
+documentation = "https://docs.rs/dar-forensic"
+authors     = ["Albert Hui"]
+keywords    = ["forensics", "dar", "archive", "passware", "backup"]
+categories  = ["parser-implementations"]
+
+[features]
+# The forensic analyzer is pure-metadata over the parsed catalogue; every codec
+# is always compiled into dar-core. The only optional feature is `serde`.
+default = []
+# Derive `serde::Serialize` on the parser entry and `audit()` finding types for
+# JSON/structured export. Off by default.
+serde = ["dep:serde", "dar/serde", "forensicnomicon/serde"]
+
+[dependencies]
+dar = { workspace = true }
+forensicnomicon = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile   = { workspace = true }
+flate2     = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

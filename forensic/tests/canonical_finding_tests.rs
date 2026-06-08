@@ -1,5 +1,6 @@
 //! dar-forensic anomalies normalize onto the canonical `forensicnomicon::report`
 //! model via the `Observation` producer trait.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use dar_forensic::{Anomaly, AnomalyKind};
 use forensicnomicon::report::{Observation, Source};

@@ -4,8 +4,11 @@
 //! specific code path that real archive fixtures cannot reach.  No on-disk
 //! files are required.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use dar_forensic::{
-    Anomaly, AnomalyKind, CrcStatus, DarEntry, DarError, DarReader, EntryKind, Severity,
+    Anomaly, AnomalyKind, CrcStatus, DarAudit, DarBodyfile, DarEntry, DarError, DarReader,
+    EntryKind, Severity,
 };
 use std::io::Cursor;
 

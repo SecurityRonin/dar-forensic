@@ -61,11 +61,14 @@ fn escape_name(name: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '|' => out.push_str("\\|"),
             c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                const HEX: [u8; 16] = *b"0123456789abcdef";
                 let b = c as u32;
                 out.push('\\');
                 out.push('x');
-                out.push(char::from_digit(b >> 4, 16).unwrap());
-                out.push(char::from_digit(b & 0xf, 16).unwrap());
+                // The guard restricts `b` to <= 0x7f, so each nibble is in
+                // 0..16 and the table index is always in bounds — panic-free.
+                out.push(HEX[((b >> 4) & 0xf) as usize] as char);
+                out.push(HEX[(b & 0xf) as usize] as char);
             }
             c => out.push(c),
         }

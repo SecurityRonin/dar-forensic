@@ -1,5 +1,5 @@
 //! DAR forensic findings: severity, anomaly classification, and the analysis
-//! result returned by [`DarReader::audit`](crate::DarReader::audit).
+//! result returned by [`DarAudit::audit`](crate::DarAudit::audit).
 //!
 //! Mirrors the sibling forensic crates (e.g. `iso9660-forensic`): every
 //! anomaly's severity, stable machine-readable code, and human-readable note are

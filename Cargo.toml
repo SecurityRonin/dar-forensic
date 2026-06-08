@@ -1,48 +1,6 @@
-[package]
-name        = "dar-forensic"
-version     = "0.7.0"
-edition     = "2021"
-rust-version = "1.85"
-description = "Forensic-grade reader for Denis Corbin DAR (Disk ARchiver) archives, including the Passware Kit Mobile variant; hardened and fuzz-tested against malicious input."
-license     = "MIT"
-readme      = "README.md"
-repository  = "https://github.com/SecurityRonin/dar-forensic"
-homepage    = "https://github.com/SecurityRonin/dar-forensic"
-documentation = "https://docs.rs/dar-forensic"
-authors     = ["Albert Hui"]
-keywords    = ["forensics", "dar", "archive", "passware", "backup"]
-categories  = ["parser-implementations"]
-
-[features]
-# All six decompression codecs (gzip, bzip2, xz, zstd, lz4, lzo) are always
-# compiled in — a forensic reader must be able to read every variant it
-# encounters, so they are not optional. The only optional feature is `serde`.
-default = []
-# Derive `serde::Serialize` on the public entry and `audit()` finding types for
-# JSON/structured export. Off by default — the core reader has no serde dep.
-serde = ["dep:serde", "forensicnomicon/serde"]
-
-[dependencies]
-thiserror = { workspace = true }
-forensicnomicon = { workspace = true }
-flate2    = { workspace = true }
-bzip2-rs  = { workspace = true }
-lzma-rs   = { workspace = true }
-ruzstd    = { workspace = true }
-lz4_flex  = { workspace = true }
-lzo       = { workspace = true }
-serde     = { workspace = true, optional = true }
-
-[dev-dependencies]
-tempfile   = { workspace = true }
-flate2     = { workspace = true }
-serde_json = { workspace = true }
-
-[lints]
-workspace = true
-
 [workspace]
 resolver = "2"
+members = ["core", "forensic"]
 
 [workspace.dependencies]
 thiserror = "2"
@@ -51,11 +9,11 @@ forensicnomicon = "0.3.1"
 tempfile  = "3"
 # Pure-Rust (miniz_oxide) zlib backend — dar's "gzip" is a raw zlib stream.
 flate2    = { version = "1", default-features = false, features = ["rust_backend"] }
-# Pure-Rust bzip2 decoder (decompress-only); keeps unsafe_code = "deny".
+# Pure-Rust bzip2 decoder (decompress-only); keeps unsafe_code = "forbid".
 bzip2-rs  = "0.1"
 # Pure-Rust zstd decoder (decompress-only); dar writes a standard zstd frame.
 ruzstd    = "0.7"
-# Pure-Rust xz/lzma decoder; keeps unsafe_code = "deny".
+# Pure-Rust xz/lzma decoder; keeps unsafe_code = "forbid".
 lzma-rs   = "0.3"
 # Pure-Rust lz4 decoder; dar's per-block lz4 entries are raw LZ4 blocks.
 lz4_flex  = { version = "0.11", default-features = false, features = ["std", "safe-decode"] }
@@ -67,19 +25,30 @@ lzo       = { version = "0.1", default-features = false }
 # Optional structured-output support for audit() findings (feature = "serde").
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Internal: the forensic analyzer depends on the parser core. Keyed `dar` so the
+# import path is `use dar::…` while the published package is `dar-core`.
+dar        = { version = "0.7.0", path = "core", package = "dar-core" }
 
 [workspace.lints.rust]
-unsafe_code = "deny"
+unsafe_code = "forbid"
 
 [workspace.lints.clippy]
-pedantic                = { level = "warn", priority = -1 }
-module_name_repetitions = "allow"
-must_use_candidate      = "allow"
-missing_errors_doc      = "allow"
-missing_panics_doc      = "allow"
-cast_possible_truncation = "allow"
-cast_possible_wrap      = "allow"
-cast_sign_loss          = "allow"
+pedantic = { level = "warn", priority = -1 }
+all = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+# Paranoid: production parsers must never panic on crafted input. Tests opt out
+# via `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]`.
+unwrap_used = { level = "deny", priority = 0 }
+expect_used = { level = "deny", priority = 0 }
+module_name_repetitions = { level = "allow", priority = 1 }
+must_use_candidate = { level = "allow", priority = 1 }
+missing_errors_doc = { level = "allow", priority = 1 }
+missing_panics_doc = { level = "allow", priority = 1 }
+cast_possible_truncation = { level = "allow", priority = 1 }
+cast_possible_wrap = { level = "allow", priority = 1 }
+cast_sign_loss = { level = "allow", priority = 1 }
+cast_precision_loss = { level = "allow", priority = 1 }
 # Forensic doc comments carry file paths, version strings and shell commands;
 # backticking every identifier is noise and clippy --fix mangles the examples.
-doc_markdown            = "allow"
+doc_markdown = { level = "allow", priority = 1 }
