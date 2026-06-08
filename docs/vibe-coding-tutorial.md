@@ -361,6 +361,17 @@ We did this at three levels — and the first is the one that *defines done*:
   a photo, an already-gzipped blob, real source/prose — compressed at every level, every
   block decoded byte-exact.
 
+**The clearest proof came late — and it stung.** When we added multi-volume (sliced)
+archive support, the synthetic `dar -s` fixture passed: green, byte-exact, 100% covered. We
+shipped it. Then we re-sliced a **real 52 GB Android extraction** (`dar_xform`, 13 volumes)
+and pointed the reader at it. It *failed* — and in failing exposed two real format details
+the synthetic fixture's assumptions had hidden: the catalogue is keyed by the archive's
+`data_name`, not the slice's regenerated `internal_name`; and real format-11.1 archives
+carry an in-place path the synthetic one had omitted. Two bugs, found in minutes, by one
+real artifact — *after* a fully-passing synthetic suite. **A green synthetic test is
+necessary, never sufficient. The real artifact is the judge.** (This is also why you keep a
+few *large, real* samples around: the bug lived at a slice boundary 40 GB in.)
+
 **Prompt:**
 
 ```

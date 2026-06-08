@@ -273,6 +273,7 @@ separator.  The format is purely numeric.
 |------|-----------------|-----------|------------|---------|
 | `dar/tests/data/v11_hello.dar` | `"0;3"` | **11.3** | dar 2.8.5 on macOS (Apple Silicon) | 1 |
 | `userdata.1.dar` (confidential) | `"090"` | **9** | Passware Kit Mobile 2026 v3.0 | 637,698 |
+| real Android extraction (confidential) | `"0;3"` | **11.3** | dar 2.8 acquisition, re-sliced 13× via `dar_xform` | 302,401 |
 
 `v11_hello.dar`: standard `seqt_catalogue` escape; used for offset arithmetic
 verification.
@@ -282,6 +283,13 @@ verification.
 catalog is located by its `ref_data_name` label (= the slice label); timestamps
 use the `0x40` infinint encoding; `cmd_line` = "N/A". This is **not** a vendor
 format variant — official dar reads such archives via the terminateur trailer.
+
+A **52 GB Android extraction**, re-sliced into 13 four-GiB volumes with
+`dar_xform` and read via `DarReader::open_slices`: 302,401 catalogue entries
+parsed identically to the single-file reader, and the largest files extracted
+byte-for-byte identically across slice boundaries. This real archive caught two
+bugs the synthetic `dar -s` fixture could not — see "data_name vs internal_name,
+and the in-place path" above. Not committed (confidential evidence).
 
 Both archives share DAR magic `0x0000007b` and the same cat_sig encoding.
 

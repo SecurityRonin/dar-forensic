@@ -56,7 +56,8 @@ DAR is a C++ format; the reference implementation (`libdar`) is GPL with C bindi
 | Reads DAR formats 1–11 | ✅ | ✅ (1 + 7–11 validated against real archives) |
 | Tape-marks-disabled archives (Passware / mobile) | ✅ | ✅ |
 | Random-access extraction (`Read + Seek`) | ✅ | ✅ — composes with `ewf`, `vmdk`, … |
-| Transparent gzip / bzip2 / xz / zstd / lz4 decompression | ✅ | ✅ — pure-Rust decoders, no C |
+| Transparent gzip / bzip2 / xz / zstd / lz4 / lzo decompression | ✅ | ✅ — pure-Rust decoders, no C |
+| Multi-volume (sliced) archives | ✅ | ✅ — `open_slices()`; file data spans slices transparently |
 | Tail-scan for 90+ GiB archives (≈107 MiB read, not 99 GiB) | — | ✅ |
 | Forensic anomaly audit (`audit()` → severity-graded findings) | — | ✅ — incomplete catalogue, path-traversal, absolute path, … (serde-exportable) |
 | Timeline export (Sleuth Kit bodyfile → `mactime`) | — | ✅ — `write_bodyfile()` straight from the catalogue |
@@ -111,7 +112,7 @@ cargo +nightly fuzz run fuzz_open
 
 ## Testing
 
-117 tests — unit (private helpers + every error branch), synthetic-archive integration, and real-fixture integration — at **100% library line coverage, enforced in CI** (`cargo llvm-cov`, lcov gate), with a second gate that holds the public-API (`tests/`) suite to the same bar. Committed, reproducible fixtures cover formats 7–11 (one per dar release) and the three gzip/bzip2/xz `dar -z` codecs; parsing was additionally validated byte-for-byte against a real dar-1.0.0 edition-1 archive, and against a confidential 92 GiB Passware Kit Mobile archive (DAR format 9, 637,698 entries — not committed). The parser survives millions of `cargo fuzz` executions with zero crashes.
+184 tests — unit (private helpers + every error branch), synthetic-archive integration, and real-fixture integration — at **100% library line coverage, enforced in CI** (`cargo llvm-cov`, lcov gate), with a second gate that holds the public-API (`tests/`) suite to the same bar. Committed, reproducible fixtures cover formats 7–11 (one per dar release), all six `dar -z` codecs (gzip/bzip2/xz/zstd/lz4/lzo), and per-block and multi-volume (sliced) archives. Parsing was additionally validated byte-for-byte against a real dar-1.0.0 edition-1 archive, a confidential 92 GiB Passware Kit Mobile archive (format 9, 637,698 entries), and a real 52 GB Android extraction re-sliced into 13 volumes with `dar_xform` (302,401 entries; every extraction byte-identical to the single-file reader) — none committed. That last, real archive caught two bugs no synthetic fixture could (see `docs/implementation-notes.md`). The parser survives millions of `cargo fuzz` executions with zero crashes.
 
 ```bash
 cargo test
