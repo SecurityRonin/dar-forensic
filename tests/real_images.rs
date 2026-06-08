@@ -631,3 +631,35 @@ fn verify_xz_payload_matches() {
     let mut r = open_fixture("v11_xz.dar");
     assert_eq!(r.verify("payload.txt").expect("verify"), CrcStatus::Match);
 }
+
+// ── multi-slice (multi-volume) archives ───────────────────────────────────────
+//
+// A real `dar -s 1k` STORED archive split into ms_stored.{1,2,3,4}.dar, where
+// big.bin (2600 bytes, the deterministic pattern `i % 251`) spans slice
+// boundaries. Listing needs the catalogue in the last slice; extracting big.bin
+// needs the reader to reassemble its data across slices.
+#[test]
+fn multislice_stored_lists_and_extracts() {
+    let base = format!("{DATA_DIR}/ms_stored");
+    let mut r = DarReader::open_slices(Path::new(&base)).expect("open multi-slice archive");
+
+    let files: Vec<String> = r
+        .entries()
+        .iter()
+        .filter(|e| e.kind == EntryKind::File)
+        .map(DarEntry::path_lossy)
+        .collect();
+    assert!(files.iter().any(|n| n == "big.bin"), "lists big.bin: {files:?}");
+    assert!(files.iter().any(|n| n == "note.txt"), "lists note.txt: {files:?}");
+
+    let expected: Vec<u8> = (0..2600u32).map(|i| (i % 251) as u8).collect();
+    assert_eq!(
+        r.extract("big.bin").expect("extract big.bin"),
+        expected,
+        "big.bin must reassemble byte-exact across slice boundaries"
+    );
+    assert_eq!(
+        r.extract("note.txt").expect("extract note.txt"),
+        b"multi-slice corpus\n"
+    );
+}
