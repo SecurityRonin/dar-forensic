@@ -769,3 +769,26 @@ fn slicereader_seek_semantics() {
     assert_eq!(sr.seek(SeekFrom::Current(10)).unwrap(), 10);
     assert!(sr.seek(SeekFrom::Current(-1000)).is_err()); // before start
 }
+
+// A real `dar -at` (tape-marks-off) archive re-wrapped by `dar_xform`, which
+// regenerates the slice internal_name. The catalogue still references the
+// archive's preserved data_name, so locating it requires matching the data_name
+// (slice-header TLV type 0x0003), not the slice's internal_name label.
+#[test]
+fn xform_resliced_tapeoff_lists_and_extracts() {
+    let mut r = open_fixture("xform_tapeoff.dar");
+    let files: Vec<String> = r
+        .entries()
+        .iter()
+        .filter(|e| e.kind == EntryKind::File)
+        .map(|e| e.path_lossy().into_owned())
+        .collect();
+    assert!(files.iter().any(|n| n == "hello.txt"), "{files:?}");
+    assert!(files.iter().any(|n| n == "data.bin"), "{files:?}");
+    assert_eq!(
+        r.extract("hello.txt").unwrap(),
+        b"tape-marks-off then dar_xform\n"
+    );
+    let expected: Vec<u8> = (0..800u32).map(|i| (i % 251) as u8).collect();
+    assert_eq!(r.extract("data.bin").unwrap(), expected);
+}
