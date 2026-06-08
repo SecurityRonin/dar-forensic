@@ -3,7 +3,7 @@
 A step-by-step, follow-along tutorial for an intern learning to build *production-grade*
 software by directing an AI coding agent (Claude Code). We use the real story of how
 `dar-forensic` — a forensic-grade, pure-Rust reader for DAR archives — went from an empty
-folder to a published crate, across versions 0.1.0 → 0.6.0.
+folder to a published crate, across versions 0.1.0 → 0.7.0.
 
 **Author:** [Albert Hui](https://www.linkedin.com/in/alberthui) | **Version:** 1.1 | **Updated:** 2026-06-08
 
