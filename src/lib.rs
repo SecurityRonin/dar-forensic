@@ -287,7 +287,9 @@ pub struct DarReader<R: Read + Seek> {
 }
 
 impl<R: Read + Seek> DarReader<R> {
-    /// Open a DAR archive, validating the magic and loading the catalog.
+    // The archive/slice-header parser is one cohesive state machine; splitting
+    // it would scatter the format logic across helpers and hurt readability.
+    #[allow(clippy::too_many_lines)]
     pub fn open(mut reader: R) -> Result<Self, DarError> {
         let mut magic = [0u8; 4];
         reader

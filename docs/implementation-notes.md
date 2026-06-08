@@ -444,3 +444,16 @@ unsliced archive. `SliceReader` presents exactly that as one `Read + Seek` strea
 the catalogue location and every per-entry `archive_origin + offset` resolve across
 slice boundaries with no other change to the parser. A file whose data spans several
 slices is reassembled transparently.
+
+### data_name vs internal_name, and the in-place path
+
+A slice header carries two labels: the **internal_name** (bytes 4–13, the slice's
+own identity) and the **data_name** (slice-header TLV type `0x0003`, the archive's
+identity). The catalogue's `ref_data_name` points at the **data_name**. They are
+equal for a normally-created archive, but `dar_xform` (re-slicing) regenerates the
+internal_name while preserving the data_name — so a tape-marks-off catalogue must
+be located by the **data_name**, not the slice label. From format 11.1 the
+catalogue's label is followed by an **in-place path** NUL-string before the
+entries; it is skipped whether the catalogue was found by the `seqt_catalogue`
+escape or by `ref_data_name` match. (Found by validating against a real 52 GB
+Android extraction re-sliced with `dar_xform`.)

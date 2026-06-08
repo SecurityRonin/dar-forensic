@@ -16,7 +16,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   catalogue and per-entry offsets resolve across slice boundaries and a file whose
   data spans slices is reassembled transparently. `SliceReader::open(&paths)`
   accepts an explicit slice list. Validated against a real `dar -s` archive where a
-  file spans boundaries.
+  file spans boundaries, and against a real 52 GB Android extraction re-sliced into
+  13 volumes (302,401 entries; extractions byte-identical to the single-file reader).
+
+### Fixed
+
+- **Read re-sliced (`dar_xform`) and format-11.1+ tape-marks-off archives.**
+  Locate a tape-marks-off catalogue by the archive's `data_name` (slice-header TLV
+  type `0x0003`) rather than the slice's `internal_name` — `dar_xform` regenerates
+  the latter while preserving the former, which the catalogue references (the two
+  are identical for normally-created archives). Also skip the in-place path
+  NUL-string (format 11.1+) when the catalogue is located by `ref_data_name` match,
+  not only via the `seqt_catalogue` escape.
 
 ## [0.6.0] — 2026-06-08
 
