@@ -877,12 +877,14 @@ impl Read for SliceReader {
         // assume a full buffer (as they may for an in-memory `Cursor`) behave
         // identically over a sliced archive.
         let mut written = 0;
-        while written < buf.len() && self.pos < self.total {
+        while written < buf.len() {
             let pos = self.pos;
+            // The first slice whose data extends past `pos` contains it (slices are
+            // contiguous from 0); no such slice means end-of-archive.
             let Some(idx) = self
                 .slices
                 .iter()
-                .position(|s| pos >= s.logical_start && pos < s.logical_start + s.logical_len)
+                .position(|s| pos < s.logical_start + s.logical_len)
             else {
                 break;
             };
@@ -895,7 +897,7 @@ impl Read for SliceReader {
                 span.file.read(&mut buf[written..written + want])?
             };
             if n == 0 {
-                break;
+                break; // truncated slice: stop, do not spin
             }
             self.pos += n as u64;
             written += n;
@@ -1746,6 +1748,32 @@ fn skip_fsa<R: Read + Seek>(r: &mut R) -> Result<(), DarError> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    // ── SliceReader truncated-slice guard ─────────────────────────────────────
+
+    #[test]
+    fn slicereader_stops_on_truncated_slice() {
+        use std::io::Read;
+        // A span claiming more bytes than its file holds (only constructible
+        // internally — `open` always measures the real file). Reading must stop at
+        // the real EOF instead of spinning on the missing tail.
+        let path = std::env::temp_dir().join(format!("dar_ms_trunc_{}.bin", std::process::id()));
+        std::fs::write(&path, [1u8, 2, 3, 4]).unwrap();
+        let mut sr = SliceReader {
+            slices: vec![SliceSpan {
+                file: File::open(&path).unwrap(),
+                file_data_start: 0,
+                logical_start: 0,
+                logical_len: 100, // lies: only 4 bytes exist
+            }],
+            pos: 0,
+            total: 100,
+        };
+        let mut buf = [0u8; 50];
+        assert_eq!(sr.read(&mut buf).unwrap(), 4);
+        assert_eq!(&buf[..4], &[1, 2, 3, 4]);
+        let _ = std::fs::remove_file(&path);
+    }
 
     // ── read_infinint ─────────────────────────────────────────────────────────
 

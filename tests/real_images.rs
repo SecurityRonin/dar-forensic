@@ -669,3 +669,103 @@ fn multislice_stored_lists_and_extracts() {
         b"multi-slice corpus\n"
     );
 }
+
+// ── multi-slice: error & edge paths (fail loud on malformed slices) ────────────
+
+fn ms_write(dir: &Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+    let p = dir.join(name);
+    std::fs::write(&p, bytes).unwrap();
+    p
+}
+
+/// A slice header: magic + 10-byte label + flag + extension + `extra`.
+fn ms_hdr(ext: u8, extra: &[u8]) -> Vec<u8> {
+    let mut v = vec![0x00, 0x00, 0x00, 0x7b];
+    v.extend_from_slice(&[0u8; 10]);
+    v.push(b'E'); // flag
+    v.push(ext);
+    v.extend_from_slice(extra);
+    v
+}
+
+#[test]
+fn open_slices_missing_basename_errors() {
+    assert!(matches!(
+        DarReader::open_slices(Path::new("/no/such/dar-basename-xyz")),
+        Err(dar_forensic::DarError::Corrupt(_))
+    ));
+}
+
+#[test]
+fn slicereader_open_empty_errors() {
+    assert!(dar_forensic::SliceReader::open(&[]).is_err());
+}
+
+#[test]
+fn slicereader_rejects_bad_magic_in_later_slice() {
+    let d = tempfile::tempdir().unwrap();
+    let s1 = ms_write(d.path(), "s1", &[0u8; 32]);
+    let s2 = ms_write(d.path(), "s2", &[0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]);
+    assert!(matches!(
+        dar_forensic::SliceReader::open(&[s1, s2]),
+        Err(dar_forensic::DarError::NotADar)
+    ));
+}
+
+#[test]
+fn slicereader_parses_n_and_s_extensions() {
+    let d = tempfile::tempdir().unwrap();
+    let s1 = ms_write(d.path(), "s1", &[0u8; 32]);
+    // 'N': 16-byte header, then data + 1-byte trailer.
+    let mut n = ms_hdr(b'N', &[]);
+    n.extend_from_slice(&[1, 2, 3, 4, 5]);
+    n.push(b'T');
+    let sn = ms_write(d.path(), "sn", &n);
+    assert!(dar_forensic::SliceReader::open(&[s1.clone(), sn]).is_ok());
+    // 'S': header carries a slice-size infinint (0x80 + 4 data bytes), then data + trailer.
+    let mut s = ms_hdr(b'S', &[0x80, 0, 0, 0, 0]);
+    s.extend_from_slice(&[9, 9, 9]);
+    s.push(b'T');
+    let ss = ms_write(d.path(), "ss", &s);
+    assert!(dar_forensic::SliceReader::open(&[s1, ss]).is_ok());
+}
+
+#[test]
+fn slicereader_rejects_unknown_extension() {
+    let d = tempfile::tempdir().unwrap();
+    let s1 = ms_write(d.path(), "s1", &[0u8; 32]);
+    let mut bad = ms_hdr(b'Z', &[]); // unknown extension
+    bad.extend_from_slice(&[0, 0, 0]);
+    let s2 = ms_write(d.path(), "s2", &bad);
+    assert!(matches!(
+        dar_forensic::SliceReader::open(&[s1, s2]),
+        Err(dar_forensic::DarError::Corrupt(_))
+    ));
+}
+
+#[test]
+fn slicereader_rejects_slice_smaller_than_header() {
+    let d = tempfile::tempdir().unwrap();
+    let s1 = ms_write(d.path(), "s1", &[0u8; 32]);
+    // 'N' header is exactly 16 bytes — no room for the trailing flag byte.
+    let tiny = ms_hdr(b'N', &[]);
+    let s2 = ms_write(d.path(), "s2", &tiny);
+    assert!(matches!(
+        dar_forensic::SliceReader::open(&[s1, s2]),
+        Err(dar_forensic::DarError::Corrupt(_))
+    ));
+}
+
+#[test]
+fn slicereader_seek_semantics() {
+    use std::io::{Seek, SeekFrom};
+    let base = format!("{DATA_DIR}/ms_stored");
+    let paths: Vec<std::path::PathBuf> =
+        (1..=4).map(|n| format!("{base}.{n}.dar").into()).collect();
+    let mut sr = dar_forensic::SliceReader::open(&paths).unwrap();
+    let end = sr.seek(SeekFrom::End(0)).unwrap();
+    assert!(end > 0);
+    assert_eq!(sr.seek(SeekFrom::Start(0)).unwrap(), 0);
+    assert_eq!(sr.seek(SeekFrom::Current(10)).unwrap(), 10);
+    assert!(sr.seek(SeekFrom::Current(-1000)).is_err()); // before start
+}

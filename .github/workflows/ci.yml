@@ -144,6 +144,7 @@ jobs:
               "return Ok(result);") ;;                                           # >256 MiB tail-scan fallback
               "fn flush(&mut self) -> std::io::Result<()> {") ;;                 # CapWriter::flush — never called on the streaming path
               "self.inner.flush()") ;;                                           # CapWriter::flush body
+              "break; // truncated slice: stop, do not spin") ;;                  # SliceReader truncated-slice guard - unit-tested
               'return Err(DarError::Corrupt("terminator underflows archive".into()));') ;; # all-0xFF file forbidden by magic
               'return Err(DarError::Corrupt("header flag field too large".into()));') ;; # read_header_flags guard — unit-tested
               "return Ok(0); // the flag field was introduced at edition 2") ;;   # read_compr_bs edition-1 path — unit-tested
