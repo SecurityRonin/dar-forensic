@@ -647,10 +647,16 @@ fn multislice_stored_lists_and_extracts() {
         .entries()
         .iter()
         .filter(|e| e.kind == EntryKind::File)
-        .map(DarEntry::path_lossy)
+        .map(|e| e.path_lossy().into_owned())
         .collect();
-    assert!(files.iter().any(|n| n == "big.bin"), "lists big.bin: {files:?}");
-    assert!(files.iter().any(|n| n == "note.txt"), "lists note.txt: {files:?}");
+    assert!(
+        files.iter().any(|n| n == "big.bin"),
+        "lists big.bin: {files:?}"
+    );
+    assert!(
+        files.iter().any(|n| n == "note.txt"),
+        "lists note.txt: {files:?}"
+    );
 
     let expected: Vec<u8> = (0..2600u32).map(|i| (i % 251) as u8).collect();
     assert_eq!(

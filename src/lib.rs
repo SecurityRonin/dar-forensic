@@ -46,7 +46,9 @@
 //!
 //! Full format notes: `docs/implementation-notes.md`.
 
+use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -760,6 +762,198 @@ fn find_catalogue_within<R: Read + Seek>(
     }
 
     Err(DarError::Corrupt("seqt_catalogue not found".into()))
+}
+
+/// The byte length of one slice's header (`magic + label + flag + extension +
+/// optional TLV / slice-size`). Every slice of a multi-volume archive begins
+/// with this header; slice 1's header is the archive's own slice header, while
+/// later slices' headers are stripped so only their data regions join the
+/// logical stream. Mirrors the header prefix parsed by [`DarReader::open`].
+fn slice_header_len<R: Read + Seek>(r: &mut R) -> Result<u64, DarError> {
+    let mut magic = [0u8; 4];
+    r.read_exact(&mut magic).map_err(|_| DarError::NotADar)?;
+    if magic != DAR_MAGIC {
+        return Err(DarError::NotADar);
+    }
+    skip(r, 10)?; // internal_name label
+    let _flag = read_u8(r)?;
+    match read_u8(r)? {
+        b'T' => {
+            // TLV list: infinint(count) then count × (u16 type + infinint len + data).
+            let tlv_count = read_infinint(r)?;
+            for _ in 0..tlv_count {
+                skip(r, 2)?;
+                let len = read_infinint(r)?;
+                skip(r, len)?;
+            }
+        }
+        b'N' => {}
+        b'S' => {
+            read_infinint(r)?; // legacy slice-size field
+        }
+        other => {
+            return Err(DarError::Corrupt(format!(
+                "unknown slice-header extension {other:#04x}"
+            )));
+        }
+    }
+    Ok(r.stream_position()?)
+}
+
+/// One slice's contribution to the logical archive stream.
+struct SliceSpan {
+    file: File,
+    /// Byte offset within the slice file where this slice's contributed data
+    /// begins — 0 for slice 1 (its header is kept), the header length otherwise.
+    file_data_start: u64,
+    /// Where this slice begins in the logical (de-sliced) stream.
+    logical_start: u64,
+    /// Number of logical bytes this slice contributes.
+    logical_len: u64,
+}
+
+/// A `Read + Seek` view over a multi-volume DAR archive (`base.1.dar`,
+/// `base.2.dar`, …) presenting the slices as one contiguous logical stream:
+/// slice 1 in full (its header is the archive's slice header) followed by every
+/// later slice with its own slice header stripped. This is byte-identical to the
+/// equivalent unsliced archive, so the catalogue and per-entry offsets resolve
+/// across slice boundaries with no other change to the reader.
+pub struct SliceReader {
+    slices: Vec<SliceSpan>,
+    pos: u64,
+    total: u64,
+}
+
+impl SliceReader {
+    /// Build the logical stream from an explicit, ordered list of slice files
+    /// (`base.1.dar`, `base.2.dar`, …); the first path is slice 1.
+    pub fn open(paths: &[PathBuf]) -> Result<Self, DarError> {
+        if paths.is_empty() {
+            return Err(DarError::Corrupt("no slices provided".into()));
+        }
+        let mut slices = Vec::with_capacity(paths.len());
+        let mut logical_start = 0u64;
+        for (i, path) in paths.iter().enumerate() {
+            let mut file = File::open(path)?;
+            let len = file.seek(SeekFrom::End(0))?;
+            file.seek(SeekFrom::Start(0))?;
+            let file_data_start = if i == 0 {
+                0
+            } else {
+                slice_header_len(&mut file)?
+            };
+            // libdar's SAR layer reserves the final byte of every slice for a flag
+            // ('N' = a slice follows, 'T' = terminal); it is not archive data, so
+            // the slice's contribution is the region between its header and that
+            // trailing flag byte.
+            if len < file_data_start + 1 {
+                return Err(DarError::Corrupt(
+                    "slice smaller than its header + flag".into(),
+                ));
+            }
+            let logical_len = len - file_data_start - 1;
+            slices.push(SliceSpan {
+                file,
+                file_data_start,
+                logical_start,
+                logical_len,
+            });
+            logical_start = logical_start
+                .checked_add(logical_len)
+                .ok_or_else(|| DarError::Corrupt("total slice length overflows".into()))?;
+        }
+        Ok(Self {
+            slices,
+            pos: 0,
+            total: logical_start,
+        })
+    }
+}
+
+impl Read for SliceReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // Fill `buf` across slice boundaries — only stopping short at end-of-archive
+        // or an underlying short read — so callers that issue a single `read()` and
+        // assume a full buffer (as they may for an in-memory `Cursor`) behave
+        // identically over a sliced archive.
+        let mut written = 0;
+        while written < buf.len() && self.pos < self.total {
+            let pos = self.pos;
+            let Some(idx) = self
+                .slices
+                .iter()
+                .position(|s| pos >= s.logical_start && pos < s.logical_start + s.logical_len)
+            else {
+                break;
+            };
+            let n = {
+                let span = &mut self.slices[idx];
+                let within = pos - span.logical_start;
+                let want = (buf.len() - written).min((span.logical_len - within) as usize);
+                span.file
+                    .seek(SeekFrom::Start(span.file_data_start + within))?;
+                span.file.read(&mut buf[written..written + want])?
+            };
+            if n == 0 {
+                break;
+            }
+            self.pos += n as u64;
+            written += n;
+        }
+        Ok(written)
+    }
+}
+
+impl Seek for SliceReader {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        let target: i128 = match from {
+            SeekFrom::Start(n) => i128::from(n),
+            SeekFrom::End(n) => i128::from(self.total) + i128::from(n),
+            SeekFrom::Current(n) => i128::from(self.pos) + i128::from(n),
+        };
+        if target < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek before start of archive",
+            ));
+        }
+        self.pos = target as u64;
+        Ok(self.pos)
+    }
+}
+
+impl DarReader<SliceReader> {
+    /// Open a multi-volume (sliced) archive from its basename: `base` resolves
+    /// `base.1.dar`, `base.2.dar`, … until a slice is missing. The catalogue
+    /// lives in the last slice and entry data may span slices — both are handled
+    /// transparently. Errors if no `base.1.dar` exists.
+    pub fn open_slices(basename: &Path) -> Result<Self, DarError> {
+        let parent = basename
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let stem = basename
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| DarError::Corrupt("invalid slice basename".into()))?;
+        let mut paths = Vec::new();
+        let mut n = 1u64;
+        loop {
+            let p = parent.join(format!("{stem}.{n}.dar"));
+            if !p.exists() {
+                break;
+            }
+            paths.push(p);
+            n += 1;
+        }
+        if paths.is_empty() {
+            return Err(DarError::Corrupt(format!(
+                "no slices found for basename {}",
+                basename.display()
+            )));
+        }
+        DarReader::open(SliceReader::open(&paths)?)
+    }
 }
 
 /// Read the NUL-terminated `version_string` at the current position and return
