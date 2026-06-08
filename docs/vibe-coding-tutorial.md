@@ -5,7 +5,7 @@ software by directing an AI coding agent (Claude Code). We use the real story of
 `dar-forensic` — a forensic-grade, pure-Rust reader for DAR archives — went from an empty
 folder to a published crate, across versions 0.1.0 → 0.6.0.
 
-**Author:** [Albert Hui](https://www.linkedin.com/in/alberthui) | **Version:** 1.0 | **Updated:** 2026-06-08
+**Author:** [Albert Hui](https://www.linkedin.com/in/alberthui) | **Version:** 1.1 | **Updated:** 2026-06-08
 
 > **Follow along with the source.** The finished crate — every commit, fixture, and the
 > `lzo` sibling crate — lives at **<https://github.com/SecurityRonin/dar-forensic>**. Clone
@@ -750,6 +750,7 @@ proof at every step, is what turns "vibes" into a crate you'd stake your name on
 
 ## Version history
 
+- **v1.1** — 2026-06-08 — Added the multi-volume (sliced) ground-truth example: a passing synthetic suite, then a real 52 GB extraction that caught two bugs.
 - **v1.0** — 2026-06-08 — First complete edition.
 
 ---
