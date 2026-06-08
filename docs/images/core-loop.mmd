@@ -1,0 +1,10 @@
+flowchart TD
+    A[State intent: one feature, clearly scoped] --> B[RED: failing test on REAL data]
+    B --> C[Agent runs it — confirm it FAILS]
+    C --> D[GREEN: minimal implementation]
+    D --> E[Agent runs it — confirm it PASSES]
+    E --> F{Verify independently}
+    F -->|Real artifact? Honest claims? Minimal diff?| G[Commit: RED, then GREEN]
+    F -->|Something off| B
+    G --> H[CI green: fmt · clippy · test · coverage · fuzz · deny]
+    H --> A
