@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-06-08
+
+### Changed
+
+- **BREAKING: decompression codecs are no longer optional.** A forensic reader must be
+  able to read every variant it encounters, so gzip/bzip2/xz/zstd/lz4/lzo are always
+  compiled in. The per-codec Cargo features and the `default-features = false` "lean
+  build" are removed; only `serde` remains optional.
+
+### Removed
+
+- The `AnomalyKind::UnsupportedCodec` finding and the `unsupported_codec` check — with
+  every codec always decodable, no archive dar produces can be "unsupported". (Malformed
+  compressed data still surfaces as a loud `Corrupt` error from `extract()`.)
+
 ## [0.5.0] — 2026-06-07
 
 ### Added

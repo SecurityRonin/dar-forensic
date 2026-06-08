@@ -173,20 +173,6 @@ fn no_catalog_escape_returns_corrupt() {
     ));
 }
 
-// ── extract: unsupported codec ────────────────────────────────────────────────
-
-// Without the `lzo` feature, lzo ('l') is recognised but not decoded; extraction
-// must fail loudly rather than return compressed bytes. (With lzo compiled in —
-// the default — 'l' is decodable; see real_images.rs's lzo fixture test.)
-#[cfg(not(feature = "lzo"))]
-#[test]
-fn extract_unsupported_codec_returns_corrupt() {
-    let dar = minimal_dar(vec![file_entry("data.lzo", 0, b'l', 0, 0)]);
-    let mut r = DarReader::open(Cursor::new(dar)).expect("open");
-    assert!(matches!(r.extract("data.lzo"), Err(DarError::Corrupt(_))));
-}
-
-#[cfg(feature = "gzip")]
 #[test]
 fn extract_compressed_size_mismatch_returns_corrupt() {
     // A real zlib stream of b"hello" (decodes to 5 bytes) embedded at
@@ -217,7 +203,6 @@ fn extract_compressed_size_mismatch_returns_corrupt() {
     assert!(matches!(&err, DarError::Corrupt(s) if s.contains("declares")));
 }
 
-#[cfg(feature = "gzip")]
 #[test]
 fn format_10_compressed_catalogue_lists_entries() {
     use flate2::{write::ZlibEncoder, Compression};
@@ -954,13 +939,6 @@ fn e2e_inplace_path_without_nul_is_length_capped() {
 /// A format-11.3 archive with a stored ('n') catalogue (so it lists) holding one
 /// entry whose data is the caller's `blob`, compressed with `comp`, declaring
 /// `declared_size` uncompressed bytes.
-#[cfg(any(
-    feature = "gzip",
-    feature = "xz",
-    feature = "zstd",
-    feature = "lz4",
-    feature = "lzo"
-))]
 fn dar_with_compressed_entry(comp: u8, blob: &[u8], declared_size: u32) -> Vec<u8> {
     let mut buf = vec![0x00u8, 0x00, 0x00, 0x7b];
     buf.extend_from_slice(&[0u8; 10]); // label
@@ -988,7 +966,6 @@ fn dar_with_compressed_entry(comp: u8, blob: &[u8], declared_size: u32) -> Vec<u
     buf
 }
 
-#[cfg(feature = "gzip")]
 #[test]
 fn e2e_gzip_entry_exceeding_declared_size_is_rejected() {
     use flate2::{write::ZlibEncoder, Compression};
@@ -1002,7 +979,6 @@ fn e2e_gzip_entry_exceeding_declared_size_is_rejected() {
     assert!(matches!(&err, DarError::Corrupt(s) if s.contains("exceeds bound")));
 }
 
-#[cfg(feature = "xz")]
 #[test]
 fn e2e_xz_entry_exceeding_declared_size_is_rejected() {
     // Real xz stream of 200 'A' bytes; declared size 5 → BoundedWriter overflow.
@@ -1147,7 +1123,6 @@ fn v1_stored_lists_and_extracts() {
     assert_eq!(r.extract("root/hello.txt").expect("extract"), content);
 }
 
-#[cfg(feature = "gzip")]
 #[test]
 fn v1_gzip_catalogue_lists_and_extracts() {
     let (dar, content) = edition1(b'z');
@@ -1166,7 +1141,6 @@ fn v1_gzip_catalogue_lists_and_extracts() {
 /// A format-1 archive (gzip-global) whose single file `f` has the caller's
 /// on-disk `data` and declares uncompressed `size`. Catalogue + entry are both
 /// under the gzip global codec, so the entry decodes via the streaming path.
-#[cfg(feature = "gzip")]
 fn edition1_compressed_entry(data: &[u8], size: u32) -> Vec<u8> {
     use flate2::{write::ZlibEncoder, Compression};
     use std::io::Write;
@@ -1201,7 +1175,6 @@ fn edition1_compressed_entry(data: &[u8], size: u32) -> Vec<u8> {
     buf
 }
 
-#[cfg(feature = "gzip")]
 #[test]
 fn v1_compressed_entry_malformed_returns_corrupt() {
     let dar = edition1_compressed_entry(b"this is not a zlib stream!!", 100);
@@ -1210,7 +1183,6 @@ fn v1_compressed_entry_malformed_returns_corrupt() {
     assert!(matches!(&err, DarError::Corrupt(s) if s.contains("zlib decode failed")));
 }
 
-#[cfg(feature = "gzip")]
 #[test]
 fn v1_compressed_entry_size_mismatch_returns_corrupt() {
     use flate2::{write::ZlibEncoder, Compression};
@@ -1341,27 +1313,6 @@ fn audit_flags_incomplete_catalog() {
     ));
 }
 
-// Without the `lzo` feature, an lzo ('l') entry is recognised but not decodable,
-// so audit flags it. With lzo compiled in (the default) nothing here is
-// unsupported; the lean-build refusal contract is covered by the codec-feature
-// tests below.
-#[cfg(not(feature = "lzo"))]
-#[test]
-fn audit_flags_unsupported_codec() {
-    let dar = minimal_dar(vec![file_entry("blob.lzo", 0, b'l', 0, 0)]);
-    let r = DarReader::open(Cursor::new(dar)).expect("open");
-    let anomalies = r.audit();
-    let a = anomalies
-        .iter()
-        .find(|a| a.code == "DAR-CODEC-UNSUPPORTED")
-        .expect("unsupported-codec anomaly");
-    assert_eq!(a.severity, Severity::Medium);
-    assert!(matches!(
-        &a.kind,
-        AnomalyKind::UnsupportedCodec { codec: 'l', .. }
-    ));
-}
-
 #[test]
 fn audit_flags_absolute_path() {
     let dar = minimal_dar(vec![file_entry("/etc/shadow", 0, b'n', 0, 0)]);
@@ -1440,17 +1391,13 @@ fn anomaly_display_is_bracketed_severity_code_note() {
 #[cfg(feature = "serde")]
 #[test]
 fn audit_anomaly_serializes_to_json() {
-    let a = Anomaly::new(AnomalyKind::UnsupportedCodec {
-        path: "blob.lzo".into(),
-        codec: 'l',
+    let a = Anomaly::new(AnomalyKind::AbsolutePath {
+        path: "/etc/shadow".into(),
     });
     let json = serde_json::to_string(&a).expect("serialize");
     assert!(json.contains("\"severity\":\"Medium\""), "{json}");
-    assert!(
-        json.contains("\"code\":\"DAR-CODEC-UNSUPPORTED\""),
-        "{json}"
-    );
-    assert!(json.contains("UnsupportedCodec"), "{json}");
+    assert!(json.contains("\"code\":\"DAR-PATH-ABSOLUTE\""), "{json}");
+    assert!(json.contains("AbsolutePath"), "{json}");
 }
 
 // ── bodyfile (Sleuth Kit mactime) export ──────────────────────────────────────
@@ -1605,32 +1552,6 @@ fn entry_serializes_symlink_target_as_string() {
     assert!(json.contains("\"ctime\":null"), "{json}");
 }
 
-// ── lean build: a disabled codec is recognised, refused, and flagged ──────────
-
-/// In a build without the `gzip` feature, a gzip-compressed entry still LISTS
-/// (the catalogue here is stored), but extraction returns a clear error rather
-/// than wrong bytes, and `audit()` flags it as an unsupported codec. This is the
-/// secure-by-default lean reader contract: a codec you didn't compile in can
-/// never silently mis-decode.
-#[cfg(not(feature = "gzip"))]
-#[test]
-fn lean_build_recognises_refuses_and_flags_gzip_entry() {
-    let dar = minimal_dar(vec![file_entry("doc.z", 0, b'z', 0, 0)]);
-    let mut r = DarReader::open(Cursor::new(dar)).expect("stored catalogue lists without gzip");
-    assert_eq!(r.entries().len(), 1, "the gzip entry is still listed");
-
-    let err = r.extract("doc.z").unwrap_err();
-    assert!(
-        matches!(&err, DarError::Corrupt(s) if s.contains("not supported in this build")),
-        "{err:?}"
-    );
-
-    assert!(
-        r.audit().iter().any(|a| a.code == "DAR-CODEC-UNSUPPORTED"),
-        "audit must flag a gzip entry as unsupported when gzip is not compiled in"
-    );
-}
-
 // ── CRC verification ──────────────────────────────────────────────────────────
 
 /// A format-8+ stored ('n') file entry named `name` declaring `size` bytes at
@@ -1772,12 +1693,11 @@ fn iter_entries_matches_collected_entries() {
     assert_eq!(lazy, ["a.txt", "b.txt"]);
 }
 
-// ── zstd decode (feature = "zstd") ────────────────────────────────────────────
+// ── zstd decode ────────────────────────────────────────────
 
 /// A real standard zstd frame (zstd CLI v1.5.6) of the line below repeated 6×.
 /// dar's streamed zstd writes exactly this format (ZSTD_compressStream produces
 /// a standard frame — see compressor_zstd.cpp), so this is byte-faithful.
-#[cfg(feature = "zstd")]
 const ZSTD_FRAME: &[u8] = &[
     0x28, 0xb5, 0x2f, 0xfd, 0x24, 0xf0, 0x8d, 0x01, 0x00, 0x84, 0x02, 0x64, 0x61, 0x72, 0x2d, 0x66,
     0x6f, 0x72, 0x65, 0x6e, 0x73, 0x69, 0x63, 0x20, 0x7a, 0x73, 0x74, 0x64, 0x20, 0x64, 0x65, 0x63,
@@ -1785,7 +1705,6 @@ const ZSTD_FRAME: &[u8] = &[
     0x6e, 0x65, 0x0a, 0x01, 0x00, 0x28, 0x2e, 0x4a, 0x95, 0x01, 0x0a, 0x07, 0x45, 0x88,
 ];
 
-#[cfg(feature = "zstd")]
 #[test]
 fn zstd_entry_extracts_to_plaintext() {
     let expected = b"dar-forensic zstd decode roundtrip line\n".repeat(6);
@@ -1798,7 +1717,6 @@ fn zstd_entry_extracts_to_plaintext() {
 // A 'q' (lz4) or 'l' (lzo) codec forces per-block framing, so a crafted block
 // stream as entry data exercises decode_blocks' corruption guards via extract().
 
-#[cfg(any(feature = "lz4", feature = "lzo"))]
 fn extract_block_entry(block_stream: &[u8], comp: u8) -> DarError {
     let dar = dar_with_compressed_entry(comp, block_stream, 64);
     DarReader::open(Cursor::new(dar))
@@ -1807,7 +1725,6 @@ fn extract_block_entry(block_stream: &[u8], comp: u8) -> DarError {
         .unwrap_err()
 }
 
-#[cfg(feature = "lz4")]
 #[test]
 fn block_eof_with_nonzero_size_is_corrupt() {
     // H_EOF (type 2) must carry size 0.
@@ -1818,7 +1735,6 @@ fn block_eof_with_nonzero_size_is_corrupt() {
     );
 }
 
-#[cfg(feature = "lz4")]
 #[test]
 fn block_zero_size_data_is_corrupt() {
     // H_DATA (type 1) with size 0.
@@ -1829,7 +1745,6 @@ fn block_zero_size_data_is_corrupt() {
     );
 }
 
-#[cfg(feature = "lz4")]
 #[test]
 fn block_size_exceeding_input_is_corrupt() {
     // H_DATA claiming 1000 bytes with none remaining.
@@ -1840,7 +1755,6 @@ fn block_size_exceeding_input_is_corrupt() {
     );
 }
 
-#[cfg(feature = "lz4")]
 #[test]
 fn block_unknown_type_is_corrupt() {
     let err = extract_block_entry(&[0x63, 0x80, 0x00, 0x00, 0x00, 0x00], b'q');
@@ -1850,7 +1764,6 @@ fn block_unknown_type_is_corrupt() {
     );
 }
 
-#[cfg(feature = "lzo")]
 #[test]
 fn block_lzo_malformed_is_corrupt() {
     // A well-formed H_DATA frame whose 2-byte payload is not a valid lzo1x block

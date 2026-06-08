@@ -45,17 +45,6 @@ pub enum AnomalyKind {
         entries_recovered: usize,
     },
 
-    /// An entry is compressed with a codec this reader recognises but cannot
-    /// decode (lzo, zstd, lz4). The entry is listed, but its data cannot be
-    /// extracted here — consistent with an archive produced by a dar build
-    /// linked against codecs this pure-Rust reader does not implement.
-    UnsupportedCodec {
-        /// Path of the entry (lossy UTF-8).
-        path: String,
-        /// The libdar codec character (e.g. `l`, `d`, `q`).
-        codec: char,
-    },
-
     /// An entry's path is absolute (begins with `/`). DAR stores paths relative
     /// to the archive root, so an absolute path is unusual; on naive extraction
     /// it would write outside the destination directory. Consistent with an
@@ -109,10 +98,10 @@ impl AnomalyKind {
         match self {
             // A truncated catalogue means entries may be missing entirely.
             AnomalyKind::IncompleteCatalog { .. } => Severity::High,
-            // Unextractable data / extraction-safety irregularities.
-            AnomalyKind::UnsupportedCodec { .. }
-            | AnomalyKind::AbsolutePath { .. }
-            | AnomalyKind::ParentTraversal { .. } => Severity::Medium,
+            // Extraction-safety irregularities.
+            AnomalyKind::AbsolutePath { .. } | AnomalyKind::ParentTraversal { .. } => {
+                Severity::Medium
+            }
             // Listing irregularities with common benign explanations.
             AnomalyKind::DuplicatePath { .. }
             | AnomalyKind::FutureTimestamp { .. }
@@ -125,7 +114,6 @@ impl AnomalyKind {
     pub fn code(&self) -> &'static str {
         match self {
             AnomalyKind::IncompleteCatalog { .. } => "DAR-CATALOG-INCOMPLETE",
-            AnomalyKind::UnsupportedCodec { .. } => "DAR-CODEC-UNSUPPORTED",
             AnomalyKind::AbsolutePath { .. } => "DAR-PATH-ABSOLUTE",
             AnomalyKind::ParentTraversal { .. } => "DAR-PATH-TRAVERSAL",
             AnomalyKind::DuplicatePath { .. } => "DAR-PATH-DUPLICATE",
@@ -142,10 +130,6 @@ impl AnomalyKind {
                 "catalogue parsing stopped after recovering {entries_recovered} entries, before a \
                  clean root end-of-directory — the listing may be truncated; consistent with a \
                  partial or damaged archive, or an entry type this reader does not model"
-            ),
-            AnomalyKind::UnsupportedCodec { path, codec } => format!(
-                "entry `{path}` is compressed with the `{codec}` codec, which this reader recognises \
-                 but cannot decode — the entry is listed, but its data cannot be extracted here"
             ),
             AnomalyKind::AbsolutePath { path } => format!(
                 "entry `{path}` has an absolute path — DAR stores paths relative to the archive \

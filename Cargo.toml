@@ -1,6 +1,6 @@
 [package]
 name        = "dar-forensic"
-version     = "0.5.0"
+version     = "0.6.0"
 edition     = "2021"
 rust-version = "1.85"
 description = "Forensic-grade reader for Denis Corbin DAR (Disk ARchiver) archives, including the Passware Kit Mobile variant; hardened and fuzz-tested against malicious input."
@@ -14,19 +14,10 @@ keywords    = ["forensics", "dar", "archive", "passware", "backup"]
 categories  = ["parser-implementations"]
 
 [features]
-# Transparent decompression codecs, all on by default. Opt out (e.g.
-# `default-features = false`) for a lean reader with zero codec dependencies —
-# enough to list and extract *stored* (uncompressed) archives, such as the
-# Passware Kit Mobile corpus. A codec left disabled is still recognised: such an
-# entry is listed and flagged by `audit()`, and `extract()` returns a clear
-# error rather than wrong bytes.
-default = ["gzip", "bzip2", "xz", "zstd", "lz4", "lzo"]
-gzip = ["dep:flate2"]
-bzip2 = ["dep:bzip2-rs"]
-xz = ["dep:lzma-rs"]
-zstd = ["dep:ruzstd"]
-lz4 = ["dep:lz4_flex"]
-lzo = ["dep:lzo"]
+# All six decompression codecs (gzip, bzip2, xz, zstd, lz4, lzo) are always
+# compiled in — a forensic reader must be able to read every variant it
+# encounters, so they are not optional. The only optional feature is `serde`.
+default = []
 # Derive `serde::Serialize` on the public entry and `audit()` finding types for
 # JSON/structured export. Off by default — the core reader has no serde dep.
 serde = ["dep:serde", "forensicnomicon/serde"]
@@ -34,12 +25,12 @@ serde = ["dep:serde", "forensicnomicon/serde"]
 [dependencies]
 thiserror = { workspace = true }
 forensicnomicon = { workspace = true }
-flate2    = { workspace = true, optional = true }
-bzip2-rs  = { workspace = true, optional = true }
-lzma-rs   = { workspace = true, optional = true }
-ruzstd    = { workspace = true, optional = true }
-lz4_flex  = { workspace = true, optional = true }
-lzo       = { workspace = true, optional = true }
+flate2    = { workspace = true }
+bzip2-rs  = { workspace = true }
+lzma-rs   = { workspace = true }
+ruzstd    = { workspace = true }
+lz4_flex  = { workspace = true }
+lzo       = { workspace = true }
 serde     = { workspace = true, optional = true }
 
 [dev-dependencies]

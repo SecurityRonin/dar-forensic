@@ -34,8 +34,6 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       # Also lint with the optional `serde` feature so its derives can't rot.
       - run: cargo clippy --all-targets --all-features -- -D warnings
-      # And the lean reader (no codec features) — the gating must stay warning-clean.
-      - run: cargo clippy --all-targets --no-default-features -- -D warnings
 
   test:
     name: Test
@@ -47,9 +45,6 @@ jobs:
       - run: cargo test
       # Exercise the optional `serde` feature (audit() JSON export).
       - run: cargo test --all-features
-      # The lean reader: lists/extracts stored archives with zero codec deps and
-      # refuses (not mis-decodes) compressed entries.
-      - run: cargo test --no-default-features
 
   deny:
     name: Cargo Deny
@@ -117,17 +112,9 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - run: cargo install cargo-llvm-cov --locked
-      # Union coverage across the supported feature configurations. Some lines
-      # are reachable only in a specific build — e.g. the "unsupported codec"
-      # finding is produced only by a lean build (a full build decodes every
-      # codec, so nothing is unsupported), and the serde paths only with that
-      # feature on. A line left uncovered in EVERY configuration is the real
-      # failure; lcov merges the runs.
-      - run: cargo llvm-cov clean --workspace
-      - run: cargo llvm-cov --no-report
-      - run: cargo llvm-cov --no-report --all-features
-      - run: cargo llvm-cov --no-report --no-default-features
-      - run: cargo llvm-cov report --lcov --output-path lcov.info
+      # All codecs are always compiled; only `serde` is optional, so a single
+      # --all-features run covers every library line.
+      - run: cargo llvm-cov --all-features --lcov --output-path lcov.info
       # Enforce 100% line coverage of the library. lcov DA:<line>,0 records mark
       # uncovered lines; any such record fails the gate. (lcov merges across
       # binaries correctly, unlike the --summary-only line metric.)
@@ -139,19 +126,13 @@ jobs:
           fi
           echo "100% line coverage ✓"
       # The e2e suite (tests/, exercising only the public API) must independently
-      # cover every library line reachable through open()/extract()/audit(). The
-      # public-API tests are unioned across the default and lean builds — some
-      # paths are reachable only in one (e.g. the "unsupported codec" finding is
-      # produced only when a codec is disabled). A small, documented set of guards
-      # is unreachable through the public API in any build and is covered by the
-      # unit suite instead; those are allowlisted below. File-aware (the report
-      # spans src/lib.rs, src/findings.rs, src/bodyfile.rs).
+      # cover every library line reachable through open()/extract()/audit(). A
+      # small, documented set of guards is unreachable through the public API and
+      # is covered by the unit suite instead; those are allowlisted below.
+      # File-aware (the report spans src/lib.rs, src/findings.rs, src/bodyfile.rs).
       - name: Enforce e2e (public-API) coverage
         run: |
-          cargo llvm-cov clean --workspace
-          cargo llvm-cov --no-report --test synthetic --test real_images --test canonical_finding_tests
-          cargo llvm-cov --no-report --no-default-features --test synthetic --test real_images --test canonical_finding_tests
-          cargo llvm-cov report --lcov --output-path e2e.info
+          cargo llvm-cov --all-features --test synthetic --test real_images --test canonical_finding_tests --lcov --output-path e2e.info
           awk -F: '/^SF:/{f=$2} /^DA:[0-9]+,0$/{split($0,a,","); split(a[1],b,":"); print f" "b[2]}' e2e.info > /tmp/e2e_uncovered.txt
           fail=0
           while read -r file ln; do
@@ -167,7 +148,7 @@ jobs:
               'return Err(DarError::Corrupt("header flag field too large".into()));') ;; # read_header_flags guard — unit-tested
               "return Ok(0); // the flag field was introduced at edition 2") ;;   # read_compr_bs edition-1 path — unit-tested
               "read_infinint(r)?; // skip the initial offset") ;;                 # read_compr_bs initial-offset skip — unit-tested
-              'other => Err(DarError::Corrupt(format!("compression '"'"'{}'"'"' not supported in this build", other as char))),') ;; # decode_stream unsupported-codec arm — only reachable in a lean build; unit-tested
+              'other => Err(DarError::Corrupt(format!("unrecognised compression codec '"'"'{}'"'"'", other as char))),') ;; # decode_stream unrecognised-codec arm — unreachable via public API; unit-tested
               *) echo "::error::e2e leaves a public-API-reachable line uncovered: ${file}:${ln}: ${txt}"; fail=1 ;;
             esac
           done < /tmp/e2e_uncovered.txt
