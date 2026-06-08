@@ -6,7 +6,7 @@
 [![CI](https://github.com/SecurityRonin/dar-forensic/actions/workflows/ci.yml/badge.svg)](https://github.com/SecurityRonin/dar-forensic/actions)
 [![Sponsor](https://img.shields.io/badge/sponsor-h4x0r-ea4aaa?logo=github-sponsors)](https://github.com/sponsors/h4x0r)
 
-Pure-Rust reader for Denis Corbin **DAR (Disk ARchiver)** archives — the format mobile-forensics tools (Passware Kit Mobile, Cellebrite) use for full-filesystem extractions. Enumerates the catalog, seeks straight to any file for random-access extraction — transparently decompressing gzip, bzip2 and xz — and is hardened to be pointed safely at untrusted evidence. Zero `unsafe`, no GPL, no C bindings.
+Pure-Rust reader for Denis Corbin **DAR (Disk ARchiver)** archives — the format mobile-forensics tools (Passware Kit Mobile, Cellebrite) use for full-filesystem extractions. Enumerates the catalog, seeks straight to any file for random-access extraction — transparently decompressing gzip, bzip2, xz, zstd, lz4 and lzo, and reading multi-volume (sliced) archives — and is hardened to be pointed safely at untrusted evidence. Zero `unsafe`, no GPL, no C bindings.
 
 ## Rust library
 

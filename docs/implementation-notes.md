@@ -421,3 +421,26 @@ the archive-global codec (the char after the `version_string`) governs every
 entry *and* the catalogue. When set, the terminateur-located catalogue is a
 single codec stream that must be inflated before parsing — without this any
 compressed pre-8 archive lists zero entries.
+
+---
+
+## Multi-volume (sliced) archives — the SAR layer
+
+`dar -s <size>` splits one archive into `base.1.dar`, `base.2.dar`, … Empirically
+(real `dar 2.8` output, cross-checked with `dar -x`):
+
+- **Every slice begins with the same slice header** (`magic + 10-byte label + flag
+  + extension + TLV`, the prefix `open()` already parses to `archive_origin`). Only
+  slice 1's header is the archive's own; later slices repeat the header purely as a
+  SAR envelope.
+- **Every slice ends with a 1-byte flag**: `'N'` (0x4E, a slice follows) on
+  non-terminal slices, `'T'` (0x54, terminal) on the last. It is *not* archive data.
+- The **archive header_version** (format string, codec, command line) is written
+  **once**, right after slice 1's header.
+
+So the logical (de-sliced) archive is **slice 1 in full, then each later slice with
+its header and its trailing flag byte stripped** — byte-identical to the equivalent
+unsliced archive. `SliceReader` presents exactly that as one `Read + Seek` stream, so
+the catalogue location and every per-entry `archive_origin + offset` resolve across
+slice boundaries with no other change to the parser. A file whose data spans several
+slices is reassembled transparently.
