@@ -8,11 +8,18 @@
 
 Pure-Rust reader for Denis Corbin **DAR (Disk ARchiver)** archives — the format mobile-forensics tools (Passware Kit Mobile, Cellebrite) use for full-filesystem extractions. Enumerates the catalog, seeks straight to any file for random-access extraction — transparently decompressing gzip, bzip2, xz, zstd, lz4 and lzo, and reading multi-volume (sliced) archives — and is hardened to be pointed safely at untrusted evidence. Zero `unsafe`, no GPL, no C bindings.
 
-## Rust library
+## Two crates
+
+| Crate | Role | crates.io |
+|-------|------|-----------|
+| **`dar-core`** | read-only parser — open, enumerate, seek-extract, CRC-verify | `cargo add dar-core` |
+| **`dar-forensic`** | forensic-grade reader + anomaly auditor (`audit()` → graded findings, `write_bodyfile()`) | `cargo add dar-forensic` |
+
+`dar-forensic` re-exports the full `dar-core` reader, so the analyzer crate alone is enough for forensic work:
 
 ```toml
 [dependencies]
-dar-forensic = "0.3"
+dar-forensic = "0.7"
 ```
 
 ## Quick start
@@ -69,6 +76,21 @@ DAR is a C++ format; the reference implementation (`libdar`) is GPL with C bindi
 
 Archives written by Passware Kit Mobile have no `seqt_catalogue` escape, which once looked like a vendor-specific format. It isn't: the escape is an *optional sequential-read tape mark*, and Passware simply writes archives with tape marks **disabled** (equivalent to `dar -at`). They are **standard DAR** — official dar reads them too. `dar-forensic` locates the catalog by its `ref_data_name` label in that case (a real structural field, the same 10 bytes as the slice label), so it reads both tape-marked and tape-mark-free archives.
 
+## Anomaly codes
+
+`audit()` reads the catalogue only (no entry data) and returns severity-graded `Anomaly` values, most-severe first. Each carries a stable, machine-readable `code` (a published contract), a `severity`, and a human-readable note. Findings are **observations, not verdicts** — the analyst draws the conclusion.
+
+| `code` | Severity | What it flags |
+|--------|----------|---------------|
+| `DAR-CATALOG-INCOMPLETE` | High | Catalogue ended early — fewer entries recovered than the archive claims (truncation or corruption) |
+| `DAR-PATH-ABSOLUTE` | Medium | Entry path begins with `/` — extraction outside the intended root |
+| `DAR-PATH-TRAVERSAL` | Medium | Entry path contains a `..` component — directory-traversal on extraction |
+| `DAR-PATH-DUPLICATE` | Low | The same path appears more than once in the catalogue |
+| `DAR-TIME-FUTURE` | Low | An `atime`/`mtime`/`ctime` is far in the future — possible timestamp tampering |
+| `DAR-NAME-CONTROL` | Low | Entry name contains control characters (`< 0x20` or `0x7f`) — terminal-injection / concealment |
+
+With the `serde` feature, `Anomaly` is `Serialize` for JSON/structured export.
+
 ## Format support
 
 | DAR format | `version_string` | Status |
@@ -107,12 +129,14 @@ The format version is the header `version_string`, each byte `value + 48` (`"090
 ```bash
 rustup install nightly
 cargo install cargo-fuzz
+# three targets: the parser (fuzz_open), full read+extract (fuzz_read),
+# and the audit pipeline (fuzz_forensic)
 cargo +nightly fuzz run fuzz_open
 ```
 
 ## Testing
 
-184 tests — unit (private helpers + every error branch), synthetic-archive integration, and real-fixture integration — at **100% library line coverage, enforced in CI** (`cargo llvm-cov`, lcov gate), with a second gate that holds the public-API (`tests/`) suite to the same bar. Committed, reproducible fixtures cover formats 7–11 (one per dar release), all six `dar -z` codecs (gzip/bzip2/xz/zstd/lz4/lzo), and per-block and multi-volume (sliced) archives. Parsing was additionally validated byte-for-byte against a real dar-1.0.0 edition-1 archive, a confidential 92 GiB Passware Kit Mobile archive (format 9, 637,698 entries), and a real 52 GB Android extraction re-sliced into 13 volumes with `dar_xform` (302,401 entries; every extraction byte-identical to the single-file reader) — none committed. That last, real archive caught two bugs no synthetic fixture could (see `docs/implementation-notes.md`). The parser survives millions of `cargo fuzz` executions with zero crashes.
+187 tests — unit (private helpers + every error branch), synthetic-archive integration, and real-fixture integration — at **100% library line coverage, enforced in CI** (`cargo llvm-cov`, lcov gate), with a second gate that holds the public-API (`tests/`) suite to the same bar. Committed, reproducible fixtures cover formats 7–11 (one per dar release), all six `dar -z` codecs (gzip/bzip2/xz/zstd/lz4/lzo), and per-block and multi-volume (sliced) archives. Parsing was additionally validated byte-for-byte against a real dar-1.0.0 edition-1 archive, a confidential 92 GiB Passware Kit Mobile archive (format 9, 637,698 entries), and a real 52 GB Android extraction re-sliced into 13 volumes with `dar_xform` (302,401 entries; every extraction byte-identical to the single-file reader) — none committed. That last, real archive caught two bugs no synthetic fixture could (see `docs/implementation-notes.md`). The parser survives millions of `cargo fuzz` executions with zero crashes.
 
 ```bash
 cargo test
