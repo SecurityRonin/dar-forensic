@@ -1,17 +1,17 @@
 [package]
 name        = "dar-core"
 version     = "0.7.0"
-edition     = "2021"
-rust-version = "1.85"
+edition.workspace = true
+rust-version.workspace = true
 description = "Pure-Rust read-only parser for Denis Corbin DAR (Disk ARchiver) archives, including the Passware Kit Mobile variant; hardened and fuzz-tested against malicious input."
-license     = "MIT"
-readme      = "README.md"
-repository  = "https://github.com/SecurityRonin/dar-forensic"
-homepage    = "https://github.com/SecurityRonin/dar-forensic"
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/dar-core"
-authors     = ["Albert Hui"]
-keywords    = ["forensics", "dar", "archive", "passware", "backup"]
-categories  = ["parser-implementations"]
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lib]
 name = "dar"
