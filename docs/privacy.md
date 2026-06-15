@@ -1,43 +1,27 @@
 # Privacy Policy
 
-**Effective date:** 2026-06-03  
-**Product:** dar-forensic (Rust library)  
-**Operator:** Security Ronin Ltd
+*Last updated: 2026-06-15*
 
----
+## Summary
 
-## What dar-forensic collects
+dar-forensic is a local Rust library. It does not collect, transmit, or store any personal data on remote servers.
 
-dar-forensic is a local Rust library. It does not operate a server, does not have a backend, and does not transmit data to Security Ronin or any third party.
+## Data Access
 
-dar-forensic opens and reads DAR archive bytes from a `Read + Seek` source you provide (a file, an in-memory buffer, or any seekable stream). It makes no network connections of any kind.
-
----
-
-## File data
-
-dar-forensic reads archive bytes to enumerate the catalog and extract stored files. Extracted bytes are returned to your own code and never uploaded, cached off-machine, or shared. Nothing leaves your process.
-
----
+dar-forensic reads only the file bytes you pass to it. All processing happens in memory on your local machine. Nothing is uploaded anywhere.
 
 ## Telemetry
 
-dar-forensic has no telemetry, no crash reporting, no analytics, and no update checks. It never phones home.
+dar-forensic has **no telemetry**. It makes no network requests of any kind.
 
----
+## Open Source
 
-## Open source
-
-dar-forensic is fully open source under the MIT licence. You can audit every line — including the fact that there are no network calls — at [github.com/SecurityRonin/dar-forensic](https://github.com/SecurityRonin/dar-forensic).
-
----
-
-## Changes
-
-If this policy changes materially, the effective date above will be updated and a note will appear in the release changelog.
-
----
+dar-forensic is open source (MIT). You can audit every line of code at [github.com/SecurityRonin/dar-forensic](https://github.com/SecurityRonin/dar-forensic).
 
 ## Contact
 
-Security Ronin Ltd — [github.com/SecurityRonin](https://github.com/SecurityRonin)
+Privacy questions: [security@securityronin.com](mailto:security@securityronin.com)
+
+---
+
+[Terms of Service](terms.md) · [Home](index.md) · © 2026 Security Ronin Ltd.

@@ -1,46 +1,28 @@
 # Terms of Service
 
-**Effective date:** 2026-06-03  
-**Product:** dar-forensic (Rust library)  
-**Operator:** Security Ronin Ltd
-
----
+*Last updated: 2026-06-15*
 
 ## Licence
 
-dar-forensic is released under the [MIT Licence](https://github.com/SecurityRonin/dar-forensic/blob/main/LICENSE). You are free to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the software, subject to the licence terms.
+dar-forensic is released under the [MIT License](https://github.com/SecurityRonin/dar-forensic/blob/main/LICENSE). You may use, modify, and distribute it subject to the terms of that licence.
 
----
+## Acceptable Use
 
-## Acceptable use
+You agree to use dar-forensic only for lawful purposes, including but not limited to:
 
-dar-forensic is designed for lawful digital forensics, incident response, and backup inspection. You agree to use dar-forensic only for purposes that are legal in your jurisdiction.
+- Digital forensics investigations on systems you own or are authorised to examine
+- Incident response activities within your organisation
+- Security research and CTF competitions
+- Academic or educational use
 
-Prohibited uses include but are not limited to:
+## No Warranty
 
-- Reading or extracting archives, devices, or data you do not own or have explicit authorisation to access.
-- Any activity that violates applicable computer fraud, data protection, or privacy laws.
-
----
-
-## No warranty
-
-dar-forensic is provided **"as is"**, without warranty of any kind, express or implied. Security Ronin Ltd makes no representations regarding fitness for evidentiary, legal, or regulatory purposes. dar-forensic reads a complex, partly reverse-engineered archive format; verify critical results against an independent tool. Use in official proceedings is solely at the user's discretion and risk.
-
----
-
-## Limitation of liability
-
-To the maximum extent permitted by law, Security Ronin Ltd shall not be liable for any direct, indirect, incidental, special, or consequential damages arising out of the use or inability to use dar-forensic.
-
----
-
-## Changes
-
-If these terms change materially, the effective date above will be updated and a note will appear in the release changelog.
-
----
+dar-forensic is provided "as is" without warranty of any kind. Security Ronin Ltd is not liable for any damages arising from use of this software.
 
 ## Contact
 
-Security Ronin Ltd — [github.com/SecurityRonin](https://github.com/SecurityRonin)
+[security@securityronin.com](mailto:security@securityronin.com)
+
+---
+
+[Privacy Policy](privacy.md) · [Home](index.md) · © 2026 Security Ronin Ltd.
