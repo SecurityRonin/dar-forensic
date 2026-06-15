@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/dar-forensic.svg)](https://crates.io/crates/dar-forensic)
 [![docs.rs](https://img.shields.io/docsrs/dar-forensic)](https://docs.rs/dar-forensic)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/SecurityRonin/dar-forensic/actions/workflows/ci.yml/badge.svg)](https://github.com/SecurityRonin/dar-forensic/actions)
 [![Sponsor](https://img.shields.io/badge/sponsor-h4x0r-ea4aaa?logo=github-sponsors)](https://github.com/sponsors/h4x0r)
 
@@ -59,7 +59,7 @@ DAR is a C++ format; the reference implementation (`libdar`) is GPL with C bindi
 
 | | libdar (C++) | `dar-forensic` |
 |---|---|---|
-| Language / linkage | C++, GPL, C FFI | pure Rust, MIT, `unsafe_code = "deny"` |
+| Language / linkage | C++, GPL, C FFI | pure Rust, Apache-2.0, `unsafe_code = "deny"` |
 | Reads DAR formats 1–11 | ✅ | ✅ (1 + 7–11 validated against real archives) |
 | Tape-marks-disabled archives (Passware / mobile) | ✅ | ✅ |
 | Random-access extraction (`Read + Seek`) | ✅ | ✅ — composes with `ewf`, `vmdk`, … |
