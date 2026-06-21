@@ -65,9 +65,9 @@ Each `Anomaly`'s `severity`, `code`, and `note` are *derived* from its `AnomalyK
 - **No allocation bombs** — a forged `stored_size` is validated against the real archive length *before* any allocation.
 - **No backward seeks** — a length that would cast to a negative `i64` seek is rejected.
 - **Zero `unsafe`** (`unsafe_code = "deny"`) and continuously fuzz-tested — `fuzz_open` (parser), `fuzz_read` (read + extract), and `fuzz_forensic` (the audit pipeline).
-- **187 tests at 100% library line coverage, CI-enforced** — validated not only against synthetic fixtures for formats 7–11 and all six codecs, but byte-for-byte against a real dar-1.0.0 archive, a 92 GiB Passware Kit Mobile archive (637,698 entries), and a 52 GB Android extraction re-sliced into 13 volumes (every extraction byte-identical to the single-file reader).
+- **187 tests at 100% library line coverage, CI-enforced** — the committed real-archive fixtures are written by the upstream **`dar` reference CLI** (dar 2.3.12 → 2.8.5) and `dar_xform`: the reader must list, seek-extract, and CRC-verify each one back to the exact content `dar` archived, across formats 7–11, all six codecs, per-block mode, and multi-volume slices. Development also exercised the reader against a real dar-1.0.0 archive, a large Passware Kit Mobile archive, and a large Android extraction (described in `docs/implementation-notes.md`); those archives are confidential / outsized and **not committed**, so no in-repo test reproduces them today.
 
-The full per-version DAR layout, the Passware tape-marks-off explanation, and the real-archive validation log are in the [repository README](https://github.com/SecurityRonin/dar-forensic) and `docs/implementation-notes.md`.
+How each oracle and corpus backs each capability — and the recommended `dar -x` differential and env-gated large-corpus tests — is in [docs/validation.md](https://securityronin.github.io/dar-forensic/validation/). The full per-version DAR layout and the Passware tape-marks-off explanation are in `docs/implementation-notes.md`.
 
 ---
 

@@ -41,6 +41,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Validation: validation.md
   - Implementation Notes: implementation-notes.md
   - Vibe Coding Tutorial: vibe-coding-tutorial.md
   - Privacy Policy: privacy.md
