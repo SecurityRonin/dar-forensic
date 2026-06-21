@@ -12,6 +12,7 @@ documentation = "https://docs.rs/dar-core"
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
+exclude     = ["/tests"]
 
 [lib]
 name = "dar"

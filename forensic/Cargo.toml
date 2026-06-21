@@ -12,6 +12,7 @@ documentation = "https://docs.rs/dar-forensic"
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
+exclude     = ["/tests"]
 
 [features]
 # The forensic analyzer is pure-metadata over the parsed catalogue; every codec

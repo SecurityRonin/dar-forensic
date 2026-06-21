@@ -29,7 +29,7 @@ use dar_forensic::{CrcStatus, DarAudit, DarEntry, DarReader, EntryKind};
 use std::io::Cursor;
 use std::path::Path;
 
-const DATA_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
+const DATA_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/data");
 
 /// The single regular-file entry in an archive (entries() now also lists the
 /// containing directory, so we can't assume index 0 is the file).
