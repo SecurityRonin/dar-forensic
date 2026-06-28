@@ -19,7 +19,7 @@ categories = ["parser-implementations"]
 [workspace.dependencies]
 thiserror = "2"
 # Shared forensic report model — Severity / Finding / Observation.
-forensicnomicon = "0.3.1"
+forensicnomicon = "1"
 tempfile  = "3"
 # Pure-Rust (miniz_oxide) zlib backend — dar's "gzip" is a raw zlib stream.
 flate2    = { version = "1", default-features = false, features = ["rust_backend"] }
