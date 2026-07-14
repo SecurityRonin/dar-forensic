@@ -56,6 +56,13 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+// Adapt `DarReader` to the forensic-vfs `FileSystem` contract (behind the `vfs`
+// feature) so a DAR archive's file tree composes as `Arc<dyn FileSystem>`.
+#[cfg(feature = "vfs")]
+mod vfs;
+#[cfg(feature = "vfs")]
+pub use vfs::DarVfs;
+
 /// `00 00 00 7b` — DAR magic (SAUV_MAGIC_NUMBER = 123, big-endian u32).
 const DAR_MAGIC: [u8; 4] = [0x00, 0x00, 0x00, 0x7b];
 

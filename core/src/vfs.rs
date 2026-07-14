@@ -1,0 +1,525 @@
+//! `impl FileSystem for DarVfs` — the forensic-vfs adapter (behind the `vfs`
+//! feature) so a DAR archive's file tree composes as `Arc<dyn FileSystem>` in the
+//! forensic-vfs engine, like the ISO 9660 / UDF adapters.
+//!
+//! [`DarVfs`] wraps a parsed [`DarReader`] plus a content cache in a `Mutex`, so
+//! every read is `&self` over interior mutability and one mounted handle serves N
+//! workers (matching the iso9660/udf adapters — [`DarReader::extract`] takes
+//! `&mut self`, which the `Mutex` provides). Nodes are addressed by
+//! [`FileId::Opaque`] carrying an index into an internal node vector built at
+//! [`DarVfs::open`] — DAR's catalogue is a flat list of full `/`-separated paths,
+//! so the directory tree is derived by splitting those paths and a synthetic root
+//! (node 0) is seeded for the archive's top level.
+//!
+//! ## Mapping notes / known limits
+//! - **FsKind.** `forensic-vfs`'s `FsKind` has no DAR/archive variant (it is
+//!   `#[non_exhaustive]`, and this crate must not add one), so
+//!   [`FileSystem::kind`] reports [`FsKind::Other`].
+//! - **Sector sizes.** A DAR archive is a byte stream with no media geometry;
+//!   [`FileSystem::sector_sizes`] reports 512 for all three fields (a neutral
+//!   default, not a real on-media block).
+//! - **Times.** DAR records real Unix-epoch atime/mtime/ctime per entry, so
+//!   [`FsMeta::times`] is populated (`modified`/`accessed`, and `changed` when the
+//!   format records ctime); `born` is `None` (DAR stores no creation time).
+//!   Epoch is UTC-anchored, so [`FileSystem::timestamp_zone`] is
+//!   [`TimeZonePolicy::Utc`].
+//! - **Single stream.** A DAR entry has one data stream; a non-`Default`
+//!   [`StreamId`] is refused loud.
+//! - **Extents (first cut).** An archive exposes no on-media allocation runs, so
+//!   [`FileSystem::extents`] yields a single logical run (`image_offset` = 0,
+//!   `len` = the entry's uncompressed size) rather than true on-disk runs.
+//!   Surfacing the archive's stored offset/length is future work.
+//! - **Deleted/unallocated (first cut).** DAR carving of orphaned catalogue
+//!   entries and free-space enumeration are not yet surfaced, so
+//!   [`FileSystem::deleted`]/[`FileSystem::unallocated`] are empty streams. Future
+//!   work, not fabricated data.
+
+use std::collections::HashMap;
+use std::io::{Read, Seek};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use forensic_vfs::{
+    Allocation, ByteRun, DirEntry as VfsDirEntry, DirStream, ExtentStream, FileId, FileSystem,
+    FsKind, FsMeta, MacbTimes, NodeKind, NodeStream, ResidencyKind, RunAlloc, RunFlags, RunInfo,
+    SectorSizes, StreamId, TimeResolution, TimeSource, TimeStamp, TimeZonePolicy, VfsError,
+    VfsResult,
+};
+
+use crate::{DarEntry, DarError, DarReader, EntryKind};
+
+/// A neutral logical block size for an archive byte stream (no media geometry).
+const ARCHIVE_BLOCK: u32 = 512;
+
+/// One node in the derived directory tree. The synthetic root is node 0 (`path`
+/// `None`); every catalogue entry becomes a node carrying its full archive path.
+struct Node {
+    /// Full `/`-separated archive path (raw bytes); `None` only for the synthetic
+    /// root. Used verbatim as the [`DarReader::extract`] key.
+    path: Option<Vec<u8>>,
+    /// Last path component (raw bytes) — the name a parent lists this child under.
+    name: Vec<u8>,
+    kind: NodeKind,
+    size: u64,
+    uid: u32,
+    gid: u32,
+    mode: u16,
+    atime: i64,
+    mtime: i64,
+    ctime: Option<i64>,
+    symlink_target: Option<Vec<u8>>,
+    /// Node ids of this node's directory children.
+    children: Vec<u64>,
+}
+
+/// Reader plus its per-entry decompressed-content cache, guarded by one mutex.
+struct Inner<R: Read + Seek> {
+    reader: DarReader<R>,
+    /// Node id → the entry's fully-decompressed bytes (extraction is not free, and
+    /// `read_at` may be called repeatedly at different offsets).
+    cache: HashMap<u64, Arc<Vec<u8>>>,
+}
+
+/// A mounted DAR archive exposed through the forensic-vfs `FileSystem` contract.
+/// Reads are `&self` over an interior `Mutex`, so one handle serves N workers.
+pub struct DarVfs<R: Read + Seek> {
+    inner: Mutex<Inner<R>>,
+    nodes: Vec<Node>,
+}
+
+impl<R: Read + Seek + Send> DarVfs<R> {
+    /// Open a DAR archive over a `Read + Seek` cursor.
+    ///
+    /// Parses the archive catalogue, then derives the directory tree from the flat
+    /// list of full paths: a synthetic root (node 0) plus one node per entry, wired
+    /// parent→children by splitting each path on `/`.
+    pub fn open(reader: R) -> VfsResult<Self> {
+        let reader = DarReader::open(reader).map_err(map_err)?;
+        let entries = reader.entries();
+        let nodes = build_tree(&entries);
+        Ok(Self {
+            inner: Mutex::new(Inner {
+                reader,
+                cache: HashMap::new(),
+            }),
+            nodes,
+        })
+    }
+
+    /// Lock the interior state, recovering from a poisoned mutex rather than
+    /// panicking (Paranoid Gatekeeper).
+    fn lock(&self) -> MutexGuard<'_, Inner<R>> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Resolve a [`FileId`] to a node, or a loud error for any non-`Opaque` id or
+    /// an index outside the node table.
+    fn node_of(&self, id: FileId) -> VfsResult<&Node> {
+        let idx = index_of(id)?;
+        self.nodes
+            .get(usize::try_from(idx).unwrap_or(usize::MAX))
+            .ok_or(VfsError::Unsupported {
+                layer: "dar file-id",
+                scheme: format!("Opaque({idx}) out of range"),
+            })
+    }
+}
+
+/// The node index carried by a [`FileId`]; any other identity domain is a caller
+/// error surfaced loud.
+fn index_of(id: FileId) -> VfsResult<u64> {
+    match id {
+        FileId::Opaque(n) => Ok(n),
+        other => Err(VfsError::Unsupported {
+            layer: "dar file-id",
+            scheme: format!("{other:?}"),
+        }),
+    }
+}
+
+/// A DAR entry exposes a single unnamed data stream; a named-stream id is refused
+/// loud.
+fn require_default_stream(stream: StreamId) -> VfsResult<()> {
+    match stream {
+        StreamId::Default => Ok(()),
+        other => Err(VfsError::Unsupported {
+            layer: "dar stream",
+            scheme: format!("{other:?}"),
+        }),
+    }
+}
+
+/// Map a [`DarError`] to the VFS error type, keeping I/O distinct from a
+/// structural decode failure.
+fn map_err(e: DarError) -> VfsError {
+    match e {
+        DarError::Io(source) => VfsError::Io {
+            op: "dar read",
+            source,
+        },
+        DarError::NotADar => VfsError::Bootstrap {
+            stage: "dar mount",
+            detail: "not a DAR archive".to_string(),
+        },
+        other => VfsError::Decode {
+            layer: "dar",
+            offset: 0,
+            detail: other.to_string(),
+            bytes: forensic_vfs::SmallHex::new(&[]),
+        },
+    }
+}
+
+/// Map a DAR [`EntryKind`] to a VFS [`NodeKind`].
+fn node_kind(kind: EntryKind) -> NodeKind {
+    match kind {
+        EntryKind::Directory => NodeKind::Dir,
+        EntryKind::Symlink => NodeKind::Symlink,
+        _ => NodeKind::File,
+    }
+}
+
+/// The last `/`-separated component of a raw path (the leaf name). A path with no
+/// separator is its own name.
+fn leaf(path: &[u8]) -> Vec<u8> {
+    match path.iter().rposition(|&b| b == b'/') {
+        Some(pos) => path.get(pos + 1..).unwrap_or(&[]).to_vec(),
+        None => path.to_vec(),
+    }
+}
+
+/// Map a Unix-epoch seconds timestamp to a VFS [`TimeStamp`].
+fn to_timestamp(secs: i64) -> TimeStamp {
+    TimeStamp {
+        unix_nanos: i128::from(secs) * 1_000_000_000,
+        source: TimeSource::Unspecified,
+        resolution: TimeResolution::Seconds,
+    }
+}
+
+/// Derive the directory tree (node 0 = synthetic root) from the flat catalogue of
+/// full `/`-separated paths. Every entry becomes a node; parent→children links are
+/// resolved by full-path prefix. An entry whose parent directory was not itself
+/// listed is attached to the root so it is never lost.
+fn build_tree(entries: &[DarEntry]) -> Vec<Node> {
+    let mut nodes: Vec<Node> = Vec::with_capacity(entries.len() + 1);
+    // Node 0: synthetic root.
+    nodes.push(Node {
+        path: None,
+        name: Vec::new(),
+        kind: NodeKind::Dir,
+        size: 0,
+        uid: 0,
+        gid: 0,
+        mode: 0,
+        atime: 0,
+        mtime: 0,
+        ctime: None,
+        symlink_target: None,
+        children: Vec::new(),
+    });
+
+    // Map each full path to its node id as we create nodes.
+    let mut by_path: HashMap<Vec<u8>, u64> = HashMap::new();
+    for e in entries {
+        let id = nodes.len() as u64;
+        by_path.insert(e.path.clone(), id);
+        nodes.push(Node {
+            path: Some(e.path.clone()),
+            name: leaf(&e.path),
+            kind: node_kind(e.kind),
+            size: e.size,
+            uid: u32::try_from(e.uid).unwrap_or(u32::MAX),
+            gid: u32::try_from(e.gid).unwrap_or(u32::MAX),
+            mode: e.mode,
+            atime: e.atime,
+            mtime: e.mtime,
+            ctime: e.ctime,
+            symlink_target: e.symlink_target.clone(),
+            children: Vec::new(),
+        });
+    }
+
+    // Wire parent→children by full-path prefix (the segment before the last '/').
+    for e in entries {
+        let Some(&child) = by_path.get(&e.path) else {
+            continue; // cov:unreachable: every entry path was just inserted
+        };
+        let parent_id = match e.path.iter().rposition(|&b| b == b'/') {
+            Some(pos) => {
+                let parent_path = e.path.get(..pos).unwrap_or(&[]);
+                by_path.get(parent_path).copied().unwrap_or(0)
+            }
+            None => 0,
+        };
+        if let Some(parent) = nodes.get_mut(usize::try_from(parent_id).unwrap_or(usize::MAX)) {
+            parent.children.push(child);
+        }
+    }
+    nodes
+}
+
+impl<R: Read + Seek + Send> FileSystem for DarVfs<R> {
+    fn kind(&self) -> FsKind {
+        // forensic-vfs has no DAR/archive FsKind variant (see the module note).
+        FsKind::Other
+    }
+
+    fn root(&self) -> FileId {
+        FileId::Opaque(0)
+    }
+
+    fn sector_sizes(&self) -> SectorSizes {
+        SectorSizes {
+            logical: ARCHIVE_BLOCK,
+            physical: ARCHIVE_BLOCK,
+            cluster_or_block: ARCHIVE_BLOCK,
+        }
+    }
+
+    fn timestamp_zone(&self) -> TimeZonePolicy {
+        // DAR stores Unix-epoch seconds, which are UTC-anchored.
+        TimeZonePolicy::Utc
+    }
+
+    fn read_dir(&self, ino: FileId) -> VfsResult<DirStream> {
+        let _ = ino;
+        todo!("GREEN")
+    }
+
+    fn extents(&self, ino: FileId, stream: StreamId) -> VfsResult<ExtentStream> {
+        let _ = (ino, stream);
+        todo!("GREEN")
+    }
+
+    fn lookup(&self, parent: FileId, name: &[u8]) -> VfsResult<Option<FileId>> {
+        let _ = (parent, name);
+        todo!("GREEN")
+    }
+
+    fn meta(&self, ino: FileId) -> VfsResult<FsMeta> {
+        let _ = ino;
+        todo!("GREEN")
+    }
+
+    fn read_at(&self, ino: FileId, stream: StreamId, off: u64, buf: &mut [u8]) -> VfsResult<usize> {
+        let _ = (ino, stream, off, buf);
+        todo!("GREEN")
+    }
+
+    fn read_link(&self, ino: FileId, cap: usize) -> VfsResult<Vec<u8>> {
+        let _ = (ino, cap);
+        todo!("GREEN")
+    }
+
+    fn deleted(&self) -> VfsResult<NodeStream> {
+        Ok(NodeStream::empty())
+    }
+
+    fn unallocated(&self) -> VfsResult<ExtentStream> {
+        Ok(ExtentStream::empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// The committed real `v11_hello.dar` fixture (dar 2.8.5, format 11.3): a
+    /// single `files/hello.txt` = `"hello corpus\n"` (13 bytes). See
+    /// `tests/data/README.md`.
+    const V11_HELLO: &[u8] = include_bytes!("../../tests/data/v11_hello.dar");
+    const HELLO_CONTENT: &[u8] = b"hello corpus\n";
+
+    fn open_hello() -> DarVfs<Cursor<Vec<u8>>> {
+        DarVfs::open(Cursor::new(V11_HELLO.to_vec())).expect("open v11_hello.dar")
+    }
+
+    /// Walk from the root to `files/hello.txt`, returning its FileId.
+    fn hello_id(fs: &DarVfs<Cursor<Vec<u8>>>) -> FileId {
+        let files = fs
+            .lookup(fs.root(), b"files")
+            .expect("lookup files")
+            .expect("files dir present");
+        fs.lookup(files, b"hello.txt")
+            .expect("lookup hello.txt")
+            .expect("hello.txt present")
+    }
+
+    #[test]
+    fn kind_root_and_zone() {
+        let fs = open_hello();
+        assert_eq!(fs.kind(), FsKind::Other);
+        assert!(matches!(fs.root(), FileId::Opaque(0)));
+        assert_eq!(fs.timestamp_zone(), TimeZonePolicy::Utc);
+        let ss = fs.sector_sizes();
+        assert_eq!(ss.logical, 512);
+        assert_eq!(ss.cluster_or_block, 512);
+        assert!(ss.physical >= 512);
+        // root() is resolvable via meta as a directory.
+        let m = fs.meta(fs.root()).expect("root meta");
+        assert_eq!(m.kind, NodeKind::Dir);
+    }
+
+    #[test]
+    fn lists_root_and_reaches_files_dir() {
+        let fs = open_hello();
+        let names: Vec<Vec<u8>> = fs
+            .read_dir(fs.root())
+            .expect("read_dir root")
+            .map(|e| e.expect("entry").name)
+            .collect();
+        assert!(
+            names.iter().any(|n| n == b"files"),
+            "root should list the 'files' directory, got {names:?}"
+        );
+        let files = fs
+            .lookup(fs.root(), b"files")
+            .expect("lookup")
+            .expect("files");
+        assert_eq!(fs.meta(files).expect("meta files").kind, NodeKind::Dir);
+    }
+
+    #[test]
+    fn reads_hello_content_and_meta() {
+        let fs = open_hello();
+        let id = hello_id(&fs);
+        let m = fs.meta(id).expect("meta hello");
+        assert_eq!(m.kind, NodeKind::File);
+        assert_eq!(m.size, HELLO_CONTENT.len() as u64);
+        assert_eq!(m.allocated, Allocation::Allocated);
+        // DAR records a real mtime.
+        assert!(m.times.modified.is_some(), "DAR stores mtime");
+        assert!(m.times.born.is_none(), "DAR stores no creation time");
+
+        let mut buf = [0u8; 64];
+        let n = fs
+            .read_at(id, StreamId::Default, 0, &mut buf)
+            .expect("read_at");
+        assert_eq!(&buf[..n], HELLO_CONTENT);
+    }
+
+    #[test]
+    fn read_at_content_matches_extract() {
+        // Self-consistency: the adapter's read_at yields the same bytes as the
+        // reader's own extract() for the same path.
+        let fs = open_hello();
+        let id = hello_id(&fs);
+        let mut whole = Vec::new();
+        let mut off = 0u64;
+        loop {
+            let mut buf = [0u8; 8];
+            let n = fs
+                .read_at(id, StreamId::Default, off, &mut buf)
+                .expect("read_at");
+            if n == 0 {
+                break;
+            }
+            whole.extend_from_slice(&buf[..n]);
+            off += n as u64;
+        }
+        let extracted = fs
+            .lock()
+            .reader
+            .extract(b"files/hello.txt")
+            .expect("extract");
+        assert_eq!(whole, extracted);
+        assert_eq!(whole, HELLO_CONTENT);
+    }
+
+    #[test]
+    fn read_at_with_offset_and_past_eof() {
+        let fs = open_hello();
+        let id = hello_id(&fs);
+        let mut buf = [0u8; 8];
+        let n = fs
+            .read_at(id, StreamId::Default, 6, &mut buf)
+            .expect("read");
+        assert_eq!(&buf[..n], b"corpus\n");
+        // reading past EOF yields 0
+        assert_eq!(
+            fs.read_at(id, StreamId::Default, 9999, &mut buf)
+                .expect("eof"),
+            0
+        );
+    }
+
+    #[test]
+    fn root_extents_and_hello_extents() {
+        let fs = open_hello();
+        // root is a dir with no data -> at most a single logical run
+        let root_runs: Vec<_> = fs
+            .extents(fs.root(), StreamId::Default)
+            .expect("root extents")
+            .map(|r| r.expect("run"))
+            .collect();
+        assert!(root_runs.len() <= 1);
+
+        let id = hello_id(&fs);
+        let runs: Vec<_> = fs
+            .extents(id, StreamId::Default)
+            .expect("extents")
+            .map(|r| r.expect("run"))
+            .collect();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run.len, HELLO_CONTENT.len() as u64);
+        assert_eq!(runs[0].alloc, RunAlloc::Allocated);
+    }
+
+    #[test]
+    fn empty_forensic_surfaces() {
+        let fs = open_hello();
+        assert_eq!(fs.deleted().unwrap().count(), 0);
+        assert_eq!(fs.unallocated().unwrap().count(), 0);
+        let id = hello_id(&fs);
+        assert!(fs.read_link(id, 4096).unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_dir_on_a_file_is_loud() {
+        let fs = open_hello();
+        let id = hello_id(&fs);
+        assert!(fs.read_dir(id).is_err());
+    }
+
+    #[test]
+    fn wrong_file_id_and_stream_are_loud() {
+        let fs = open_hello();
+        // A non-Opaque FileId is not a DAR node id.
+        assert!(fs.meta(FileId::NtfsRef { entry: 5, seq: 1 }).is_err());
+        assert!(fs.read_dir(FileId::NtfsRef { entry: 5, seq: 1 }).is_err());
+        assert!(fs
+            .lookup(FileId::NtfsRef { entry: 5, seq: 1 }, b"x")
+            .is_err());
+        assert!(fs
+            .read_link(FileId::NtfsRef { entry: 5, seq: 1 }, 8)
+            .is_err());
+        // An out-of-range node index is refused.
+        assert!(fs.meta(FileId::Opaque(9_999_999)).is_err());
+        // A named stream is refused.
+        let id = hello_id(&fs);
+        assert!(fs
+            .read_at(id, StreamId::Named(1), 0, &mut [0u8; 4])
+            .is_err());
+        assert!(fs.extents(id, StreamId::Named(1)).is_err());
+    }
+
+    #[test]
+    fn lookup_missing_is_none() {
+        let fs = open_hello();
+        assert!(fs.lookup(fs.root(), b"NOPE.NOTPRESENT").unwrap().is_none());
+    }
+
+    #[test]
+    fn index_of_rejects_non_opaque() {
+        assert!(super::index_of(FileId::Opaque(42)).is_ok());
+        assert!(super::index_of(FileId::NtfsRef { entry: 1, seq: 1 }).is_err());
+    }
+
+    #[test]
+    fn leaf_splits_on_last_separator() {
+        assert_eq!(super::leaf(b"files/hello.txt"), b"hello.txt");
+        assert_eq!(super::leaf(b"toplevel"), b"toplevel");
+        assert_eq!(super::leaf(b"a/b/c"), b"c");
+    }
+}

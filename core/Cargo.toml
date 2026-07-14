@@ -25,6 +25,10 @@ default = []
 # Derive `serde::Serialize` on the public entry types for JSON/structured
 # export. Off by default — the core reader has no serde dep.
 serde = ["dep:serde"]
+# Adapt `DarReader` to the forensic-vfs `FileSystem` trait (see `src/vfs.rs`) so
+# a DAR archive's file tree composes as `Arc<dyn FileSystem>` in the forensic-vfs
+# engine, like the ISO 9660 / UDF adapters.
+vfs = ["dep:forensic-vfs"]
 
 [dependencies]
 thiserror = { workspace = true }
@@ -35,6 +39,10 @@ ruzstd    = { workspace = true }
 lz4_flex  = { workspace = true }
 lzo       = { workspace = true }
 serde     = { workspace = true, optional = true }
+# forensic-vfs (KNOWLEDGE leaf) — the read-only FileSystem navigation contract.
+# Optional so the bare reader stays dependency-light; the `vfs` feature turns on
+# the adapter.
+forensic-vfs = { version = "0.1", optional = true }
 
 [dev-dependencies]
 flate2     = { workspace = true }
