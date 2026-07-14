@@ -122,6 +122,20 @@ impl<R: Read + Seek + Send> DarVfs<R> {
                 scheme: format!("Opaque({idx}) out of range"),
             })
     }
+
+    /// The fully-decompressed bytes of node `idx` (a file at archive `path`),
+    /// extracting once and caching by node id so repeated `read_at` offsets do not
+    /// re-decompress. A decode/IO failure is surfaced loud, never a silent empty.
+    fn content(&self, idx: u64, path: &[u8]) -> VfsResult<Arc<Vec<u8>>> {
+        let mut inner = self.lock();
+        if let Some(data) = inner.cache.get(&idx) {
+            return Ok(Arc::clone(data));
+        }
+        let bytes = inner.reader.extract(path).map_err(map_err)?;
+        let arc = Arc::new(bytes);
+        inner.cache.insert(idx, Arc::clone(&arc));
+        Ok(arc)
+    }
 }
 
 /// The node index carried by a [`FileId`]; any other identity domain is a caller
@@ -282,33 +296,134 @@ impl<R: Read + Seek + Send> FileSystem for DarVfs<R> {
     }
 
     fn read_dir(&self, ino: FileId) -> VfsResult<DirStream> {
-        let _ = ino;
-        todo!("GREEN")
+        let node = self.node_of(ino)?;
+        if node.kind != NodeKind::Dir {
+            return Err(VfsError::Decode {
+                layer: "dar",
+                offset: 0,
+                detail: format!("node {:?} is not a directory", index_of(ino)?),
+                bytes: forensic_vfs::SmallHex::new(&[]),
+            });
+        }
+        // Snapshot children into owned entries so the stream outlives the borrow.
+        let mut out: Vec<VfsResult<VfsDirEntry>> = Vec::with_capacity(node.children.len());
+        for &child in &node.children {
+            let Some(c) = self.nodes.get(usize::try_from(child).unwrap_or(usize::MAX)) else {
+                continue; // cov:unreachable: children hold in-range node ids by construction
+            };
+            out.push(Ok(VfsDirEntry {
+                name: c.name.clone(),
+                id: FileId::Opaque(child),
+                kind: c.kind,
+            }));
+        }
+        Ok(DirStream::new(out.into_iter()))
     }
 
     fn extents(&self, ino: FileId, stream: StreamId) -> VfsResult<ExtentStream> {
-        let _ = (ino, stream);
-        todo!("GREEN")
+        let node = self.node_of(ino)?;
+        require_default_stream(stream)?;
+        // First cut: an archive exposes no on-media runs, so a non-empty file
+        // yields one logical run (image_offset 0). See the module note.
+        if node.size == 0 {
+            return Ok(ExtentStream::empty());
+        }
+        let run = RunInfo {
+            run: ByteRun {
+                image_offset: 0,
+                len: node.size,
+                flags: RunFlags::default(),
+            },
+            alloc: RunAlloc::Allocated,
+        };
+        Ok(ExtentStream::new(std::iter::once(Ok(run))))
     }
 
     fn lookup(&self, parent: FileId, name: &[u8]) -> VfsResult<Option<FileId>> {
-        let _ = (parent, name);
-        todo!("GREEN")
+        let node = self.node_of(parent)?;
+        if node.kind != NodeKind::Dir {
+            return Err(VfsError::Decode {
+                layer: "dar",
+                offset: 0,
+                detail: format!("node {:?} is not a directory", index_of(parent)?),
+                bytes: forensic_vfs::SmallHex::new(&[]),
+            });
+        }
+        for &child in &node.children {
+            if let Some(c) = self.nodes.get(usize::try_from(child).unwrap_or(usize::MAX)) {
+                if c.name == name {
+                    return Ok(Some(FileId::Opaque(child)));
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn meta(&self, ino: FileId) -> VfsResult<FsMeta> {
-        let _ = ino;
-        todo!("GREEN")
+        let idx = index_of(ino)?;
+        let node = self.node_of(ino)?;
+        Ok(FsMeta {
+            ino: idx,
+            kind: node.kind,
+            allocated: Allocation::Allocated,
+            size: node.size,
+            nlink: 1,
+            uid: Some(node.uid),
+            gid: Some(node.gid),
+            mode: Some(u32::from(node.mode)),
+            times: MacbTimes {
+                modified: Some(to_timestamp(node.mtime)),
+                accessed: Some(to_timestamp(node.atime)),
+                changed: node.ctime.map(to_timestamp),
+                // DAR records no creation time; honestly absent, not epoch-0.
+                born: None,
+            },
+            streams: Vec::new(),
+            residency: ResidencyKind::NonResident,
+            link_target: node.symlink_target.clone(),
+        })
     }
 
     fn read_at(&self, ino: FileId, stream: StreamId, off: u64, buf: &mut [u8]) -> VfsResult<usize> {
-        let _ = (ino, stream, off, buf);
-        todo!("GREEN")
+        let idx = index_of(ino)?;
+        require_default_stream(stream)?;
+        // Validate the node exists / is a file; a directory (or the root) has no
+        // extractable data and reads as 0.
+        let (kind, path) = {
+            let node = self.node_of(ino)?;
+            (node.kind, node.path.clone())
+        };
+        if kind != NodeKind::File {
+            return Ok(0);
+        }
+        let Some(path) = path else {
+            return Ok(0);
+        };
+        let data = self.content(idx, &path)?;
+        let Ok(start) = usize::try_from(off) else {
+            return Ok(0);
+        };
+        if start >= data.len() {
+            return Ok(0);
+        }
+        let n = (data.len() - start).min(buf.len());
+        if let (Some(dst), Some(src)) = (buf.get_mut(..n), data.get(start..start + n)) {
+            dst.copy_from_slice(src);
+        }
+        Ok(n)
     }
 
     fn read_link(&self, ino: FileId, cap: usize) -> VfsResult<Vec<u8>> {
-        let _ = (ino, cap);
-        todo!("GREEN")
+        let node = self.node_of(ino)?;
+        match &node.symlink_target {
+            Some(target) => {
+                let n = target.len().min(cap);
+                Ok(target.get(..n).unwrap_or(&[]).to_vec())
+            }
+            // A non-symlink (or a symlink with no recorded target) reads as an
+            // empty target, matching the iso9660/udf adapters.
+            None => Ok(Vec::new()),
+        }
     }
 
     fn deleted(&self) -> VfsResult<NodeStream> {
