@@ -254,10 +254,10 @@ fn build_tree(entries: &[DarEntry]) -> Vec<Node> {
     }
 
     // Wire parent→children by full-path prefix (the segment before the last '/').
-    for e in entries {
-        let Some(&child) = by_path.get(&e.path) else {
-            continue; // cov:unreachable: every entry path was just inserted
-        };
+    // Nodes were pushed in entry order after the synthetic root, so entry `i` is
+    // node id `i + 1` — the child id is known by construction, no lookup needed.
+    for (i, e) in entries.iter().enumerate() {
+        let child = (i + 1) as u64;
         let parent_id = match e.path.iter().rposition(|&b| b == b'/') {
             Some(pos) => {
                 let parent_path = e.path.get(..pos).unwrap_or(&[]);
@@ -400,9 +400,10 @@ impl<R: Read + Seek + Send> FileSystem for DarVfs<R> {
             return Ok(0);
         };
         let data = self.content(idx, &path)?;
-        let Ok(start) = usize::try_from(off) else {
-            return Ok(0);
-        };
+        // An offset that overflows usize (only possible on a <64-bit target)
+        // saturates to usize::MAX, which is past any real length, so the EOF
+        // check below reads it as 0 — no separate, untestable overflow arm.
+        let start = usize::try_from(off).unwrap_or(usize::MAX);
         if start >= data.len() {
             return Ok(0);
         }
@@ -636,5 +637,119 @@ mod tests {
         assert_eq!(super::leaf(b"files/hello.txt"), b"hello.txt");
         assert_eq!(super::leaf(b"toplevel"), b"toplevel");
         assert_eq!(super::leaf(b"a/b/c"), b"c");
+    }
+
+    #[test]
+    fn map_err_maps_io_bootstrap_and_decode() {
+        let io = super::map_err(DarError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "eof",
+        )));
+        assert!(matches!(io, VfsError::Io { op: "dar read", .. }));
+
+        let boot = super::map_err(DarError::NotADar);
+        assert!(matches!(
+            boot,
+            VfsError::Bootstrap {
+                stage: "dar mount",
+                ..
+            }
+        ));
+
+        let decode = super::map_err(DarError::Corrupt("boom".into()));
+        assert!(matches!(decode, VfsError::Decode { layer: "dar", .. }));
+    }
+
+    #[test]
+    fn node_kind_maps_directory_symlink_and_other() {
+        assert_eq!(super::node_kind(EntryKind::Directory), NodeKind::Dir);
+        assert_eq!(super::node_kind(EntryKind::Symlink), NodeKind::Symlink);
+        assert_eq!(super::node_kind(EntryKind::File), NodeKind::File);
+    }
+
+    #[test]
+    fn lookup_on_a_file_is_loud() {
+        let fs = open_hello();
+        let id = hello_id(&fs);
+        assert!(fs.lookup(id, b"anything").is_err());
+    }
+
+    #[test]
+    fn read_at_on_a_directory_reads_zero() {
+        let fs = open_hello();
+        let files = fs.lookup(fs.root(), b"files").unwrap().unwrap();
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            fs.read_at(files, StreamId::Default, 0, &mut buf).unwrap(),
+            0
+        );
+    }
+
+    /// A blank node of the given kind — a test-only builder for exercising the
+    /// defensive guards a well-formed catalogue can never trigger.
+    fn blank_node(kind: NodeKind) -> Node {
+        Node {
+            path: None,
+            name: Vec::new(),
+            kind,
+            size: 0,
+            uid: 0,
+            gid: 0,
+            mode: 0,
+            atime: 0,
+            mtime: 0,
+            ctime: None,
+            symlink_target: None,
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dangling_child_id_is_skipped_not_panicked() {
+        // A directory whose child id points past the node table is a state
+        // build_tree never emits; read_dir and lookup must skip it defensively
+        // rather than panic on the out-of-range index.
+        let mut fs = open_hello();
+        let bad = fs.nodes.len() as u64;
+        let mut dir = blank_node(NodeKind::Dir);
+        dir.path = Some(b"bad".to_vec());
+        dir.name = b"bad".to_vec();
+        dir.children = vec![9_999_999];
+        fs.nodes.push(dir);
+        let id = FileId::Opaque(bad);
+        assert_eq!(fs.read_dir(id).unwrap().count(), 0);
+        assert!(fs.lookup(id, b"whatever").unwrap().is_none());
+    }
+
+    #[test]
+    fn file_node_without_a_path_reads_zero() {
+        // A File node with no recorded path cannot arise from a parsed catalogue
+        // (every entry node carries its path); the guard reads it as 0.
+        let mut fs = open_hello();
+        let ghost = fs.nodes.len() as u64;
+        let mut node = blank_node(NodeKind::File);
+        node.size = 8; // non-zero size, still no path
+        fs.nodes.push(node);
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            fs.read_at(FileId::Opaque(ghost), StreamId::Default, 0, &mut buf)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn read_link_returns_recorded_target_and_honors_cap() {
+        let mut fs = open_hello();
+        let sym = fs.nodes.len() as u64;
+        let mut node = blank_node(NodeKind::Symlink);
+        node.path = Some(b"link".to_vec());
+        node.name = b"link".to_vec();
+        node.symlink_target = Some(b"/etc/passwd".to_vec());
+        fs.nodes.push(node);
+        let id = FileId::Opaque(sym);
+        assert_eq!(fs.read_link(id, 4096).unwrap(), b"/etc/passwd");
+        // cap truncates the returned target
+        assert_eq!(fs.read_link(id, 4).unwrap(), b"/etc");
     }
 }

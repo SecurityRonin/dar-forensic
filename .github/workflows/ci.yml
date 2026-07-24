@@ -82,7 +82,10 @@ jobs:
       # rustix (0.36.x) whose `rustc_*` attributes current nightly rejects,
       # breaking the build. Unlocking lets cargo resolve a rustix that compiles.
       - run: cargo install cargo-fuzz
-      - run: cargo fuzz build
+      # `cargo +nightly` on the command line beats the rust-toolchain.toml pin
+      # (1.96.0 stable); without it the pin wins and `-Z sanitizer=address` is
+      # rejected ("the option `Z` is only accepted on the nightly compiler").
+      - run: cargo +nightly fuzz build
 
   secrets:
     name: Secret Scan (gitleaks)
@@ -135,7 +138,14 @@ jobs:
       # forensic/src/bodyfile.rs).
       - name: Enforce e2e (public-API) coverage
         run: |
-          cargo llvm-cov --workspace --all-features --test synthetic --test real_images --test canonical_finding_tests --lcov --output-path e2e.info
+          # This gate is scoped to the forensic reader/analyzer public API
+          # (open()/extract()/audit(), exercised by forensic/tests/). The core
+          # `vfs` adapter (core/src/vfs.rs, behind the `vfs` feature) is a
+          # separate FileSystem-trait API this suite does not drive; its 100%
+          # coverage is enforced by the total-coverage gate above via its own
+          # unit suite, so exclude it here rather than mis-flag it as an
+          # uncovered forensic-public-API line.
+          cargo llvm-cov --workspace --all-features --ignore-filename-regex 'core/src/vfs\.rs' --test synthetic --test real_images --test canonical_finding_tests --lcov --output-path e2e.info
           awk -F: '/^SF:/{f=$2} /^DA:[0-9]+,0$/{split($0,a,","); split(a[1],b,":"); print f" "b[2]}' e2e.info > /tmp/e2e_uncovered.txt
           fail=0
           while read -r file ln; do
