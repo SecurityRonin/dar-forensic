@@ -17,10 +17,10 @@ url = "https://raw.githubusercontent.com/google/rust-crate-audits/main/audits.to
 url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 
 [policy.dar-core]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [policy.dar-forensic]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [[exemptions.anyhow]]
 version = "1.0.102"
@@ -44,14 +44,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.crc32fast]]
 version = "1.5.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.dar-core]]
-version = "0.7.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.dar-forensic]]
-version = "0.8.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.errno]]
