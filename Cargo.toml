@@ -41,7 +41,7 @@ serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Internal: the forensic analyzer depends on the parser core. Keyed `dar` so the
 # import path is `use dar::…` while the published package is `dar-core`.
-dar        = { version = "0.7.0", path = "core", package = "dar-core" }
+dar        = { version = "0.7.1", path = "core", package = "dar-core" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
