@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2](https://github.com/SecurityRonin/dar-forensic/compare/dar-core-v0.7.1...dar-core-v0.7.2) - 2026-11-04
+
+### Fixed
+
+- *(security)* bump ruzstd to 0.9.1 for RUSTSEC-2026-0344
+
 ## [0.7.1](https://github.com/SecurityRonin/dar-forensic/compare/dar-core-v0.7.0...dar-core-v0.7.1) - 2026-07-25
 
 ### Added
