@@ -26,7 +26,7 @@ flate2    = { version = "1", default-features = false, features = ["rust_backend
 # Pure-Rust bzip2 decoder (decompress-only); keeps unsafe_code = "forbid".
 bzip2-rs  = "0.1"
 # Pure-Rust zstd decoder (decompress-only); dar writes a standard zstd frame.
-ruzstd    = "0.7"
+ruzstd    = "0.9.1"
 # Pure-Rust xz/lzma decoder; keeps unsafe_code = "forbid".
 lzma-rs   = "0.3"
 # Pure-Rust lz4 decoder; dar's per-block lz4 entries are raw LZ4 blocks.

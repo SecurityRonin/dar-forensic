@@ -1181,7 +1181,7 @@ fn decode_stream<R: Read, W: Write>(input: R, algo: u8, out: &mut W) -> Result<(
         }
         b'd' => {
             // dar's streamed zstd is a standard zstd frame (ZSTD_compressStream).
-            let mut dec = ruzstd::StreamingDecoder::new(input)
+            let mut dec = ruzstd::decoding::StreamingDecoder::new(input)
                 .map_err(|e| DarError::Corrupt(format!("zstd decode failed: {e}")))?;
             std::io::copy(&mut dec, out)
                 .map_err(|e| DarError::Corrupt(format!("zstd decode failed: {e}")))?;

@@ -70,10 +70,6 @@ criteria = "safe-to-run"
 version = "2.3.0"
 criteria = "safe-to-run"
 
-[[exemptions.indexmap]]
-version = "2.14.0"
-criteria = "safe-to-run"
-
 [[exemptions.itoa]]
 version = "1.0.18"
 criteria = "safe-to-run"
@@ -119,12 +115,8 @@ version = "1.1.4"
 criteria = "safe-to-run"
 
 [[exemptions.ruzstd]]
-version = "0.7.3"
+version = "0.9.1"
 criteria = "safe-to-deploy"
-
-[[exemptions.semver]]
-version = "1.0.28"
-criteria = "safe-to-run"
 
 [[exemptions.serde]]
 version = "1.0.228"
@@ -163,7 +155,7 @@ version = "1.11.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.twox-hash]]
-version = "1.6.3"
+version = "2.1.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.unicode-ident]]
@@ -176,8 +168,4 @@ criteria = "safe-to-run"
 
 [[exemptions.windows-sys]]
 version = "0.61.2"
-criteria = "safe-to-run"
-
-[[exemptions.zmij]]
-version = "1.0.21"
 criteria = "safe-to-run"
