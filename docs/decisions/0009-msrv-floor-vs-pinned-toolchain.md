@@ -1,4 +1,4 @@
-# 9. Declared MSRV floor (1.85) separate from the pinned dev toolchain (1.96.0)
+# 9. Declared MSRV floor (1.87) separate from the pinned dev toolchain (1.96.0)
 
 Date: 2026-07-24
 Status: Accepted
@@ -23,14 +23,14 @@ keep a real, low MSRV floor rather than tracking the dev toolchain.
   `rust-toolchain.toml` (`channel = "1.96.0"`, with `clippy`/`rustfmt`
   components declared in the toml so CI and local agree — commit `3fc4363`
   `chore: pin toolchain to 1.96.0`).
-- **Declare a low MSRV floor** of `rust-version = "1.85"` once in
+- **Declare a low MSRV floor** of `rust-version = "1.87"` once in
   `[workspace.package]` (`Cargo.toml`), inherited by both members via
   `rust-version.workspace = true` (commit `defc9f8`). This is deliberately far
   below the 1.96.0 dev pin — the two are decoupled by design.
 
 ## Consequences
 
-- Downstream consumers can build `dar-core`/`dar-forensic` on Rust 1.85+, while
+- Downstream consumers can build `dar-core`/`dar-forensic` on Rust 1.87+, while
   contributors develop on the pinned 1.96.0 — the promise is wider than the
   build environment.
 - The `1.85` figure is higher than the fleet's usual `1.75`/`1.80` library
@@ -41,5 +41,10 @@ keep a real, low MSRV floor rather than tracking the dev toolchain.
   pure-Rust decoder crates per ADR 0004). The floor should be treated as
   CI-verified fact and only lowered if a `cargo msrv`/CI check confirms a lower
   version builds.
+- **2026-11-04: raised 1.85 -> 1.87.** `ruzstd` 0.9.1, the first release fixing
+  RUSTSEC-2026-0344 (a zstd decompression bomb in a decoder this crate runs on
+  untrusted archives), declares `rust-version = "1.87"`, and cargo refuses to
+  build it on 1.85. A security fix in an always-compiled decoder outranks the
+  lower floor. (An outside contributor proposed the same change in PR #9.)
 - Keeping MSRV in `[workspace.package]` (not restated per-crate) means a
   deliberate fleet bump is one edit; a second copy would drift.

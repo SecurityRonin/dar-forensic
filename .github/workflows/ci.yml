@@ -25,8 +25,8 @@ jobs:
       # macOS and Windows, which nothing here has ever been shown to pass.
       os-matrix: false
       # The old MSRV job ran `cargo test --workspace` on 1.85, not a bare build.
-      # The floor needs no input: both members declare rust-version "1.85", so
-      # the workflow derives the same 1.85 the job was pinned to.
+      # The floor needs no input: the workflow derives it from the members'
+      # rust-version (1.87 since ruzstd 0.9.1, ADR 0009).
       msrv-check: test
       # `all-features` stays at its default (true), which reproduces the old
       # coverage command exactly:
